@@ -25,3 +25,7 @@ venv/
 # --- misc ---------------------------------------------------------------------
 .DS_Store
 *.swp
+
+# --- runtime state (pid files, job markers, rendered wrappers) --------------
+run/*
+!run/.gitkeep
