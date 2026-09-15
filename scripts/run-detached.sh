@@ -129,7 +129,7 @@ systemd-run --user \
   --setenv=PATH="$PATH" \
   -- /bin/bash -lc "
       set -o pipefail
-      '$TARGET' $(printf '%q ' "$@") 2>&1
+      '$TARGET' $( [ $# -gt 0 ] && printf '%q ' "$@" ) 2>&1
       rc=\$?
       # A marker so completion is detectable without talking to systemd, e.g.
       # from a cron poller or another machine.
