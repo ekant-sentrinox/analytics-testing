@@ -1,0 +1,42 @@
+# ---------------------------------------------------------------------------
+# S3 — DuckLake data storage.
+#
+# The bucket is SHARED. Everything this project writes lives under
+# s3.prefix, and every cleanup path is restricted to it.
+# Authentication is the EC2 instance role (analytics-performance-s3-role);
+# no access keys are configured or accepted.
+# ---------------------------------------------------------------------------
+
+s3:
+  bucket: ${S3_BUCKET}
+  prefix: ${S3_PREFIX}
+  region: ${AWS_REGION}
+
+  auth:
+    provider: instance_role
+    # DuckDB equivalent: CREATE SECRET (TYPE S3, PROVIDER credential_chain).
+    duckdb_secret_provider: credential_chain
+
+  # scripts/check-s3.sh verifies each of these before a run.
+  preflight:
+    check_identity: true
+    check_bucket_head: true
+    check_list: true
+    check_read: true
+    check_write: true
+    # Written and then deleted by the write check. Inside the test prefix.
+    probe_key: _preflight/probe.txt
+
+  # scripts/cleanup.sh will refuse to touch anything not matching this.
+  cleanup:
+    allowed_prefix: ${S3_PREFIX}
+    require_confirmation: true
+    # Never true. Present so the intent is explicit rather than assumed.
+    allow_bucket_delete: false
+
+  metrics:
+    poll_interval_seconds: 60
+    # ListObjectsV2 over the prefix. On a large lake this is the expensive part
+    # of monitoring; raise the interval before raising anything else.
+    track_object_count: true
+    track_total_bytes: true

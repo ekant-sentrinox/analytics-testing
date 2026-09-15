@@ -1,0 +1,40 @@
+# ---------------------------------------------------------------------------
+# SERVER 2 — dazzleduck-sql-otel-collector.  Rendered by deploy-collector.sh.
+# Installed to /etc/systemd/system/@SYSTEMD_UNIT@
+# ---------------------------------------------------------------------------
+[Unit]
+Description=DazzleDuck OTLP collector (benchmark) — gRPC @COLLECTOR_GRPC_PORT@, health @COLLECTOR_HEALTH_PORT@
+Documentation=file://@BASE_DIR@/conf/application.conf
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@SSH_USER@
+Group=@SSH_USER@
+Environment=HOME=/home/@SSH_USER@
+WorkingDirectory=@BASE_DIR@
+ExecStart=@BASE_DIR@/bin/run.sh
+
+# Restart on crash so a mid-run OOM shows up as a restart in the metrics rather
+# than as a silent stop. TEST 20 counts these; do not raise the burst limit
+# without saying so in the results.
+Restart=on-failure
+RestartSec=5s
+StartLimitBurst=5
+StartLimitIntervalSec=120
+
+# SIGTERM starts the collector's graceful drain: /health flips to MAINTENANCE
+# (503) for shutdown_grace_period_ms, then the gRPC server stops and in-flight
+# batches flush. Give it room; killing early is what data loss looks like.
+KillSignal=SIGTERM
+TimeoutStopSec=90
+
+StandardOutput=append:@BASE_DIR@/logs/collector.log
+StandardError=append:@BASE_DIR@/logs/collector.log
+
+LimitNOFILE=65536
+OOMPolicy=continue
+
+[Install]
+WantedBy=multi-user.target

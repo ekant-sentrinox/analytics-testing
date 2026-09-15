@@ -1,0 +1,50 @@
+# ---------------------------------------------------------------------------
+# Host-local monitoring agent. Rendered by scripts/deploy-agent.sh.
+# Installed to /etc/systemd/system/bench-agent.service on all three servers.
+#
+# Runs beside the service it observes and checks it over the LOOPBACK, which is
+# what allows 8080/8081 to stay closed in the security group. Nothing scrapes
+# this host from outside; the central exporter reads its state file over SSH.
+# ---------------------------------------------------------------------------
+[Unit]
+Description=Benchmark host agent (@ROLE@) — local health, dependency and system metrics
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@SSH_USER@
+Group=@SSH_USER@
+Environment=HOME=/home/@SSH_USER@
+Environment=AWS_REGION=@AWS_REGION@
+WorkingDirectory=@AGENT_DIR@
+ExecStart=/usr/bin/python3 @AGENT_DIR@/bin/host_agent.py \
+  --output @AGENT_DIR@/logs/host-@ROLE@.jsonl \
+  --state @AGENT_DIR@/state/health.json \
+  --role @ROLE@ \
+  --interval @AGENT_INTERVAL@ \
+  --check-interval @AGENT_CHECK_INTERVAL@ \
+  @AGENT_EXTRA_ARGS@ \
+  --s3-bucket @S3_BUCKET@ \
+  --aws-region @AWS_REGION@ \
+  --rds-host @PG_HOST@ \
+  --rds-port @PG_PORT@ \
+  --watch-path / \
+  --watch-path /var/tmp
+
+Restart=always
+RestartSec=5s
+
+# This process runs DURING a throughput measurement. If it ever becomes a
+# meaningful share of a 2-vCPU box then the benchmark is measuring the
+# monitoring, so it is capped hard and given the lowest scheduling priority.
+CPUQuota=10%
+MemoryMax=192M
+Nice=10
+IOSchedulingClass=idle
+
+StandardOutput=append:@AGENT_DIR@/logs/agent.out
+StandardError=append:@AGENT_DIR@/logs/agent.out
+
+[Install]
+WantedBy=multi-user.target

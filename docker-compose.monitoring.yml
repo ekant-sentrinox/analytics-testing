@@ -1,0 +1,126 @@
+# ---------------------------------------------------------------------------
+# Monitoring stack — SERVER 1 only.
+#
+#   docker compose -f docker-compose.monitoring.yml up -d
+#
+#   Prometheus  http://10.16.21.20:9090
+#   Grafana     http://10.16.21.20:3000   (admin / admin on first login)
+#
+# Reaching these from your workstation needs the security group to allow 3000
+# and 9090; see NETWORK.md. Everything here is optional — a benchmark run
+# records its own JSONL and produces its report without any of it. This is for
+# watching a long soak, not for capturing the measurements.
+#
+# Image tags are pinned. `latest` on Grafana has changed provisioning behaviour
+# between releases before, and a dashboard that silently stops loading mid-soak
+# is worse than an old version.
+# ---------------------------------------------------------------------------
+
+name: analytics-bench-monitoring
+
+services:
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: bench-prometheus
+    restart: unless-stopped
+    user: "65534:65534"                       # nobody; the volume is chowned by the image
+    ports:
+      - "9090:9090"
+    extra_hosts:
+      # The generator and the pipeline exporter run on the host, not in compose.
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus-data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      # 15 days is plenty for a benchmark campaign and bounded on an 8 GiB root
+      # volume. The size cap is the one that actually protects the disk.
+      - --storage.tsdb.retention.time=15d
+      - --storage.tsdb.retention.size=2GB
+      - --web.enable-lifecycle
+      - --web.console.libraries=/usr/share/prometheus/console_libraries
+      - --web.console.templates=/usr/share/prometheus/consoles
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/healthy"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: 1G }
+    logging:
+      driver: json-file
+      options: { max-size: "20m", max-file: "3" }
+
+  grafana:
+    image: grafana/grafana:11.3.1
+    container_name: bench-grafana
+    restart: unless-stopped
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_INSTALL_PLUGINS: ""
+      GF_DASHBOARDS_MIN_REFRESH_INTERVAL: "5s"
+      # Default landing page: the end-to-end view.
+      GF_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/pipeline.json
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: 512M }
+    logging:
+      driver: json-file
+      options: { max-size: "20m", max-file: "3" }
+
+  # Host metrics for SERVER 1. Servers 2 and 3 need the binary installed
+  # natively — scripts/deploy-node-exporter.sh — because there is no Docker on
+  # them and adding it just for this is not worth the disk.
+  node-exporter:
+    image: prom/node-exporter:v1.8.2
+    container_name: bench-node-exporter
+    restart: unless-stopped
+    network_mode: host
+    pid: host
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - --path.procfs=/host/proc
+      - --path.sysfs=/host/sys
+      - --path.rootfs=/rootfs
+      - --collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc|rootfs/var/lib/docker)($$|/)
+      - --web.listen-address=:9100
+    deploy:
+      resources:
+        limits: { cpus: "0.2", memory: 128M }
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "2" }
+
+volumes:
+  prometheus-data:
+  grafana-data:

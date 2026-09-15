@@ -1,0 +1,38 @@
+# ---------------------------------------------------------------------------
+# SERVER 3 — dazzleduck-sql-ducklake-compactor.  Rendered by deploy-compactor.sh.
+# Installed to /etc/systemd/system/@SYSTEMD_UNIT@
+# ---------------------------------------------------------------------------
+[Unit]
+Description=DuckLake compactor (benchmark) — health @COMPACTOR_HEALTH_PORT@
+Documentation=file://@BASE_DIR@/conf/application.conf
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@SSH_USER@
+Group=@SSH_USER@
+Environment=HOME=/home/@SSH_USER@
+WorkingDirectory=@BASE_DIR@
+ExecStart=@BASE_DIR@/bin/run.sh
+
+Restart=on-failure
+RestartSec=5s
+StartLimitBurst=5
+StartLimitIntervalSec=120
+
+# A merge that is killed part-way can leave written-but-unregistered Parquet
+# files on S3. They are orphans, not corruption — housekeeping's
+# ducklake_cleanup_old_files reclaims them — but give the merge a chance to
+# finish first.
+KillSignal=SIGTERM
+TimeoutStopSec=120
+
+StandardOutput=append:@BASE_DIR@/logs/compactor.log
+StandardError=append:@BASE_DIR@/logs/compactor.log
+
+LimitNOFILE=65536
+OOMPolicy=continue
+
+[Install]
+WantedBy=multi-user.target

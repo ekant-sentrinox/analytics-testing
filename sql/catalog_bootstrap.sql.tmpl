@@ -1,0 +1,59 @@
+-- ---------------------------------------------------------------------------
+-- DuckLake catalog bootstrap.
+--
+-- Creates the tables the collector registers Parquet files into. Column names
+-- and types mirror OtelLogSchema.SCHEMA in dazzleduck-sql-otel-collector: the
+-- Arrow schema is Timestamp(MILLISECOND) -> TIMESTAMP_MS and
+-- Map(Utf8, Utf8) -> MAP(VARCHAR, VARCHAR). A mismatch here surfaces as a
+-- registration failure at the first flush, not at startup.
+--
+-- Idempotent: safe to re-run. Does not drop anything.
+-- Rendered by scripts/bootstrap-catalog.sh.
+-- ---------------------------------------------------------------------------
+
+INSTALL httpfs;   LOAD httpfs;
+INSTALL aws;      LOAD aws;
+INSTALL ducklake; LOAD ducklake;
+INSTALL postgres; LOAD postgres;
+
+CREATE OR REPLACE SECRET s3_role (
+    TYPE S3,
+    PROVIDER credential_chain,
+    REGION '@AWS_REGION@'
+);
+
+ATTACH IF NOT EXISTS
+  'ducklake:postgres:host=@PG_HOST@ port=@PG_PORT@ dbname=@PG_DATABASE@ user=@PG_USER@ password=@PG_PASSWORD@'
+  AS @DUCKLAKE_CATALOG@ (
+    DATA_PATH 's3://@S3_BUCKET@/@S3_PREFIX@/',
+    DATA_INLINING_ROW_LIMIT 0
+  );
+
+-- OTLP logs, flattened. Full width so the collector's Parquet schema matches
+-- exactly; a narrower table would silently drop columns.
+CREATE TABLE IF NOT EXISTS @DUCKLAKE_CATALOG@.@DUCKLAKE_SCHEMA@.@DUCKLAKE_LOGS_TABLE@ (
+    timestamp            TIMESTAMP_MS,
+    observed_timestamp   TIMESTAMP_MS,
+    severity_number      INTEGER,
+    severity_text        VARCHAR,
+    body                 VARCHAR,
+    trace_id             VARCHAR,
+    span_id              VARCHAR,
+    flags                INTEGER,
+    event_name           VARCHAR,
+    attributes           MAP(VARCHAR, VARCHAR),
+    resource_attributes  MAP(VARCHAR, VARCHAR),
+    scope_name           VARCHAR,
+    scope_version        VARCHAR
+);
+
+-- One row per flushed bucket, written in the same transaction as the file
+-- registration. Drives B3 (visibility lag) and the row-count reconciliation.
+CREATE TABLE IF NOT EXISTS @DUCKLAKE_CATALOG@.@DUCKLAKE_SCHEMA@.@DUCKLAKE_WATERMARK_TABLE@ (
+    min_timestamp           TIMESTAMP_MS,
+    max_timestamp           TIMESTAMP_MS,
+    row_count               BIGINT,
+    min_commit_snapshot_id  BIGINT
+);
+
+SELECT 'catalog_bootstrap_ok' AS status;

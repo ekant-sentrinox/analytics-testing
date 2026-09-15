@@ -1,0 +1,34 @@
+# ---------------------------------------------------------------------------
+# SERVER 1 — central pipeline exporter. Rendered by scripts/deploy-agent.sh.
+#
+# A system service, not a nohup'd background job, so a 24-hour soak does not
+# depend on anyone's SSH session or laptop staying awake. Survives logout and
+# reboot, restarts on failure, and has a real status you can query afterwards.
+# ---------------------------------------------------------------------------
+[Unit]
+Description=Benchmark pipeline exporter — catalog backlog, visibility lag, S3, and per-host agent state
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@SSH_USER@
+Group=@SSH_USER@
+WorkingDirectory=@PROJECT_DIR@
+ExecStart=@PROJECT_DIR@/run/exporter-run.sh
+
+Restart=always
+RestartSec=10s
+
+# Runs for the whole duration of a measured run, so it is capped. If the
+# monitoring is ever a measurable share of a 2-vCPU box, the benchmark is
+# measuring the monitoring.
+CPUQuota=25%
+MemoryMax=512M
+Nice=10
+
+StandardOutput=append:@PROJECT_DIR@/logs/exporter.out
+StandardError=append:@PROJECT_DIR@/logs/exporter.out
+
+[Install]
+WantedBy=multi-user.target

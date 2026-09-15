@@ -1,0 +1,50 @@
+# ---------------------------------------------------------------------------
+# PostgreSQL RDS — the DuckLake catalog.
+#
+# This is an EXTERNAL, SHARED instance. The project never creates, drops or
+# migrates anything outside its own database (postgres.database below), and
+# never runs a replacement PostgreSQL container.
+# ---------------------------------------------------------------------------
+
+postgres:
+  host: ${PG_HOST}
+  port: ${PG_PORT}
+  database: ${PG_DATABASE}
+  user: ${PG_USER}
+  # Read from a file at runtime; never inlined here or in .env.
+  password_file: ${PG_PASSWORD_FILE}
+  sslmode: require
+
+  # Metrics polled by monitoring/exporters/pipeline_exporter.py. All read-only.
+  metrics:
+    poll_interval_seconds: 15
+    queries:
+      connections: >-
+        SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()
+      active_queries: >-
+        SELECT count(*) FROM pg_stat_activity
+        WHERE datname = current_database() AND state = 'active'
+      longest_query_seconds: >-
+        SELECT COALESCE(EXTRACT(EPOCH FROM max(now() - query_start)), 0)
+        FROM pg_stat_activity
+        WHERE datname = current_database() AND state = 'active'
+      database_size_bytes: >-
+        SELECT pg_database_size(current_database())
+      xact_commit: >-
+        SELECT xact_commit FROM pg_stat_database WHERE datname = current_database()
+      xact_rollback: >-
+        SELECT xact_rollback FROM pg_stat_database WHERE datname = current_database()
+      deadlocks: >-
+        SELECT deadlocks FROM pg_stat_database WHERE datname = current_database()
+
+  # DuckLake catalog growth. Table names are version-dependent; the exporter
+  # probes for them and reports absent ones rather than failing.
+  catalog_metrics:
+    snapshot_count: >-
+      SELECT count(*) FROM ducklake_snapshot
+    data_file_count: >-
+      SELECT count(*) FROM ducklake_data_file WHERE end_snapshot IS NULL
+    data_file_bytes: >-
+      SELECT COALESCE(sum(file_size_bytes), 0) FROM ducklake_data_file WHERE end_snapshot IS NULL
+    data_file_rows: >-
+      SELECT COALESCE(sum(record_count), 0) FROM ducklake_data_file WHERE end_snapshot IS NULL

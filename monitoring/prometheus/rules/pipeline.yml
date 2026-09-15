@@ -1,0 +1,115 @@
+# ---------------------------------------------------------------------------
+# Alerting and recording rules.
+#
+# These encode the sustainability criteria from TEST_PLAN.md, so the same
+# definition drives both the live dashboard and the generated report. If you
+# change what "sustainable" means, change it in both places or they will
+# disagree and only one of them will be right.
+# ---------------------------------------------------------------------------
+
+groups:
+
+  - name: pipeline-recording
+    interval: 15s
+    rules:
+      # The ratio that decides whether a level counts at all.
+      - record: bench:accepted_over_offered
+        expr: |
+          rate(bench_generator_records_accepted_total[1m])
+            / clamp_min(rate(bench_generator_records_offered_total[1m]), 0.001)
+
+      - record: bench:error_rate
+        expr: |
+          sum(rate(bench_generator_errors_total[1m]))
+            / clamp_min(sum(rate(bench_generator_requests_total[1m])), 0.001)
+
+      # Positive means the lake is falling behind faster than compaction drains.
+      - record: bench:backlog_files_slope_per_min
+        expr: deriv(bench_backlog_files[10m]) * 60
+
+      - record: bench:mean_live_file_bytes
+        expr: bench_backlog_bytes / clamp_min(bench_backlog_files, 1)
+
+  - name: pipeline-alerts
+    rules:
+
+      - alert: CollectorDown
+        expr: bench_collector_up == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "Collector /health is not reporting HEALTHY"
+          description: >-
+            The collector is the only ingest path. Check
+            `systemctl status bench-collector` on SERVER 2 and
+            /opt/analytics-bench/collector/logs/collector.log.
+
+      - alert: CompactorDown
+        expr: bench_compactor_up == 0
+        for: 2m
+        labels: { severity: warning }
+        annotations:
+          summary: "Compactor /health is not reporting UP"
+          description: >-
+            Ingest continues without the compactor, but small files accumulate
+            and query performance degrades. Not immediately data-threatening.
+
+      - alert: IngestionRejected
+        expr: rate(bench_generator_errors_total{code="RESOURCE_EXHAUSTED"}[1m]) > 0
+        for: 30s
+        labels: { severity: critical }
+        annotations:
+          summary: "Collector is rejecting ingestion (RESOURCE_EXHAUSTED)"
+          description: >-
+            Pending write bytes exceeded max_pending_write, so the queue is
+            raising PendingWriteExceededException. The current offered rate is
+            above what the writer can drain. This disqualifies the level as
+            sustainable.
+
+      - alert: AcceptRateBelowTarget
+        expr: bench:accepted_over_offered < 0.99
+        for: 3m
+        labels: { severity: warning }
+        annotations:
+          summary: "Accepted is below 99% of offered"
+          description: "Sustained shortfall between what was offered and what was acked."
+
+      - alert: BacklogGrowing
+        expr: bench:backlog_files_slope_per_min > 1
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "Uncompacted file backlog is trending up"
+          description: >-
+            B2 is growing at {{ $value | printf "%.1f" }} files/min. Compaction
+            is not keeping pace with ingestion; this rate is not sustainable
+            however good the accept rate looks.
+
+      - alert: VisibilityLagHigh
+        expr: bench_watermark_lag_seconds > 300
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Data is more than 5 minutes stale in the lake"
+          description: "now() - newest committed watermark = {{ $value | printf \"%.0f\" }}s."
+
+      - alert: CatalogConnectionsHigh
+        expr: bench_pg_connections > 40
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Many connections to the catalog database"
+          description: >-
+            The catalog is on shared RDS. Connection exhaustion there breaks
+            both the collector's post-ingest commits and the compactor.
+
+      - alert: ScrapeFailing
+        expr: bench_scrape_ok == 0
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "pipeline_exporter cannot scrape {{ $labels.source }}"
+          description: >-
+            A blind spot in the measurements. If this is the collector or
+            compactor, check the security group first — ports 4317/8080/8081
+            are dropped by default on this VPC.

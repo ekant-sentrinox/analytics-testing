@@ -1,0 +1,20 @@
+# Generator + tooling dependencies (SERVER 1).
+# Pinned: an unpinned grpcio/protobuf pair is the classic way to get a run that
+# worked yesterday and does not today.
+
+grpcio==1.68.1
+grpcio-status==1.68.1
+protobuf==5.28.3
+opentelemetry-proto==1.29.0
+
+PyJWT==2.10.1
+PyYAML==6.0.2
+prometheus-client==0.21.1
+
+# Catalog + result analysis
+psycopg[binary]==3.2.3
+duckdb==1.5.4
+boto3==1.35.76
+
+# Report generation
+matplotlib==3.9.3

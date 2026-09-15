@@ -1,0 +1,16 @@
+# Dashboard provisioning. Files in monitoring/grafana/dashboards are loaded on
+# start and refreshed every 30s, so editing the JSON on disk is enough — there
+# is no need to import anything through the UI.
+apiVersion: 1
+
+providers:
+  - name: analytics-distributed-test
+    orgId: 1
+    folder: Benchmark
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

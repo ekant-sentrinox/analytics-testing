@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# ---------------------------------------------------------------------------
+# SERVER 3 — ducklake-compactor launcher.  Rendered by deploy-compactor.sh.
+#
+# Classpath ordering matters and is the whole reason this is a script.
+# CompactionConfig.rawConfig() calls ConfigFactory.load("application"), which
+# reads application.conf off the CLASSPATH — the compactor has no -c flag. Our
+# conf/ directory therefore goes FIRST so it shadows the application.conf baked
+# into the module's target/classes.
+# ---------------------------------------------------------------------------
+set -euo pipefail
+
+BASE_DIR="@BASE_DIR@"
+REPO_DIR="@REPO_DIR@"
+MODULE="@MODULE@"
+
+export JAVA_HOME="${JAVA_HOME:-/usr/lib/jvm/java-21-amazon-corretto.x86_64}"
+export PATH="$JAVA_HOME/bin:$PATH"
+
+if [ ! -r "@PG_PASSWORD_FILE@" ]; then
+  echo "fatal: catalog password file not readable: @PG_PASSWORD_FILE@" >&2
+  exit 78
+fi
+PG_PASSWORD="$(tr -d '\r\n' < "@PG_PASSWORD_FILE@")"
+export PG_PASSWORD
+
+mkdir -p "@DUCKDB_TEMP_DIR@" "$BASE_DIR/logs" "$BASE_DIR/run"
+export HOME="${HOME:-/home/ec2-user}"
+
+CP="$BASE_DIR/conf:$REPO_DIR/$MODULE/target/classes:$REPO_DIR/$MODULE/target/lib/*"
+
+exec java \
+  -Xmx@JVM_MAX_HEAP@ \
+  @JVM_OPTS@ \
+  -cp "$CP" \
+  @MAIN_CLASS@

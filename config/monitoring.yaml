@@ -1,0 +1,128 @@
+# ---------------------------------------------------------------------------
+# Monitoring configuration.
+#
+# Two collection paths, deliberately:
+#
+#   scrape/  Prometheus + Grafana. For WATCHING a run. 15 s resolution.
+#   agents/  JSONL written to disk. For MEASURING a run. 1 s resolution, and it
+#            survives as files the report is generated from.
+#
+# The report never reads Prometheus. A benchmark result must be reproducible
+# from files that can be re-analysed months later, not from a TSDB with a
+# 15-day retention.
+# ---------------------------------------------------------------------------
+
+monitoring:
+
+  # --- what Prometheus can and cannot see ---------------------------------
+  scrape:
+    prometheus_port: 9090
+    grafana_port: 3000
+    default_interval_seconds: 15
+
+    targets:
+      generator:
+        endpoint: "127.0.0.1:${GENERATOR_METRICS_PORT}"
+        interval_seconds: 5
+        # Only up while a test runs. `up == 0` between tests is correct.
+        expected_down_when_idle: true
+
+      pipeline_exporter:
+        endpoint: "127.0.0.1:${PIPELINE_EXPORTER_PORT}"
+        interval_seconds: 15
+
+      node_exporter:
+        optional: true
+        port: 9100
+        hosts: ["${GENERATOR_HOST}", "${COLLECTOR_HOST}", "${COMPACTOR_HOST}"]
+        deploy_with: scripts/deploy-node-exporter.sh
+
+    # Present so nobody adds these as targets and then learns to ignore a red
+    # dot. Neither service exposes Prometheus text; both are polled by the
+    # pipeline exporter over their JSON /health endpoints instead.
+    not_scrapeable:
+      collector:
+        reason: >-
+          Built with SimpleMeterRegistry. Micrometer meters live in process
+          memory with no exporter. /health returns JSON with status, uptime,
+          knownQueues and batchesProcessed only.
+        lost_metrics:
+          - dazzleduck.otel.export.records
+          - dazzleduck.otel.export.latency
+          - dazzleduck.otel.writer.data_phase_ms
+          - dazzleduck.otel.writer.post_ingest_phase_ms
+          - dazzleduck.otel.writer.pending_batches
+          - dazzleduck.otel.writer.pending_buckets
+        fix: See IMPROVEMENTS.md — add a PrometheusMeterRegistry behind a config key.
+      compactor:
+        reason: >-
+          Built with LoggingMeterRegistry. Its meters ARE log lines. They are
+          parsed into raw/compaction.jsonl at collection time.
+        fix: Same, plus keep the log parser as a fallback.
+
+  # --- the pipeline exporter (this project) --------------------------------
+  exporter:
+    port: ${PIPELINE_EXPORTER_PORT}
+    interval_seconds: 10
+    # Expensive sources on a slower cadence. A full ListObjectsV2 over the
+    # prefix is the costliest thing this process does; at 10 s it would become
+    # a load source of its own.
+    watermark_interval_seconds: 60
+    s3_interval_seconds: 60
+    http_timeout_seconds: 5
+    # = compactor.sizes.minor_compaction_max_size. Keep them equal or the
+    # "small files" panel and the compactor disagree about what small means.
+    small_file_threshold_bytes: 8388608
+    jsonl: logs/pipeline.jsonl
+
+  # --- per-host agents -------------------------------------------------------
+  agents:
+    interval_seconds: 1
+    install_dir: /opt/analytics-bench/agent
+    watch:
+      generator: { process_pattern: "", jvm: false }
+      collector: { process_pattern: "otel.collector.Main", jvm: true }
+      compactor: { process_pattern: "sql.compaction.Main",  jvm: true }
+    watch_paths: ["/", "/var/tmp"]
+    captures:
+      - cpu total and per core
+      - load average, context switches
+      - memory used / available / page cache / dirty, swap
+      - disk read+write bytes, IOPS, util% per device
+      - filesystem free space
+      - network rx/tx bytes and packets
+      - watched process RSS, threads, CPU
+      - JVM heap via jcmd
+      - process restarts (start-time change)
+      - OOM kills from dmesg
+
+  # --- alerting -------------------------------------------------------------
+  # Defined in monitoring/prometheus/rules/pipeline.yml. Thresholds here are the
+  # documented copy; change both together or they will disagree.
+  alerts:
+    collector_down_for: 1m
+    compactor_down_for: 2m
+    rejection_any_for: 30s
+    accept_ratio_below: 0.99
+    backlog_slope_files_per_min_above: 1
+    visibility_lag_seconds_above: 300
+    pg_connections_above: 40
+
+  retention:
+    prometheus_time: 15d
+    prometheus_size: 2GB
+    # Small root volumes (8 GiB). A soak at 1 s sampling produces real volume;
+    # collect-results.sh slices only the run's own window into results/.
+    local_logs_note: logs/*.jsonl grow continuously while agents run
+
+  dashboards:
+    source: monitoring/grafana/build_dashboards.py
+    output: monitoring/grafana/dashboards/
+    list:
+      - pipeline        # end to end; the default home dashboard
+      - generator
+      - collector
+      - compactor
+      - infrastructure  # needs node_exporter
+      - errors
+      - storage

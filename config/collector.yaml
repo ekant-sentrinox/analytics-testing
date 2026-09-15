@@ -1,0 +1,55 @@
+# ---------------------------------------------------------------------------
+# SERVER 2 — dazzleduck-sql-otel-collector.
+#
+# Consumed by scripts/deploy-collector.sh, which renders
+# collector/config/application.conf.tmpl with these values. Edit here, redeploy,
+# do not hand-edit the rendered HOCON on the server.
+# ---------------------------------------------------------------------------
+
+collector:
+  host: ${COLLECTOR_HOST}
+  grpc_port: ${COLLECTOR_GRPC_PORT}
+  health_port: ${COLLECTOR_HEALTH_PORT}
+
+  # On-host layout. Everything this project installs on SERVER 2 lives under
+  # base_dir; nothing is dropped loose in the home directory. The source
+  # checkout stays where it already is and is treated as read-only input.
+  install:
+    base_dir: /opt/analytics-bench/collector      # conf/ bin/ logs/ run/
+    repo_dir: /home/ec2-user/dazzleduck-sql-server
+    module: dazzleduck-sql-otel-collector
+    main_class: io.dazzleduck.sql.otel.collector.Main
+    systemd_unit: bench-collector.service
+    log_file: /opt/analytics-bench/collector/logs/collector.log
+
+  jvm:
+    # t3.large = 2 vCPU / 7.6 GiB. Heap is deliberately small: Arrow buffers and
+    # the DuckDB instance both live off-heap, and the box has no swap.
+    max_heap: 2g
+    opts: >-
+      -XX:+UseG1GC
+      -XX:MaxGCPauseMillis=200
+      -XX:+ExitOnOutOfMemoryError
+      -Ddazzleduck.ingestion.writer_parallelism=2
+      -Xlog:gc*:file=/opt/analytics-bench/collector/logs/gc.log:time,uptime:filecount=5,filesize=20M
+      --add-opens=java.base/java.nio=ALL-UNNAMED
+      --add-opens=java.base/sun.nio.ch=ALL-UNNAMED
+
+  # -------------------------------------------------------------------------
+  # Ingestion queue tuning. min_bucket_size is the single most consequential
+  # knob: it sets Parquet file size, which sets the compactor's workload.
+  # Held constant across a staircase.
+  # -------------------------------------------------------------------------
+  ingestion:
+    min_bucket_size: 67108864      # FINAL: 64 MiB (peak config restored after A-B)
+    max_delay_ms: 5000
+    # Backpressure threshold. Exceeding it raises PendingWriteExceededException,
+    # surfaced to the client as gRPC RESOURCE_EXHAUSTED with RetryInfo.
+    max_pending_write: 524288000   # 500 MiB
+
+  duckdb:
+    threads: 4
+    memory_limit: 2GB
+    # NOT /tmp. On Amazon Linux 2023 /tmp is tmpfs, i.e. RAM — spilling there
+    # on a 7.6 GiB box with no swap trades a disk spill for an OOM kill.
+    temp_directory: /var/tmp/duckdb-collector

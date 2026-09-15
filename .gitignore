@@ -1,0 +1,27 @@
+# --- secrets -----------------------------------------------------------------
+.env
+*.key
+*.pem
+*.token
+*.pw
+credentials
+secrets/
+**/application.conf          # rendered from .tmpl, contains the catalog password
+**/startup.sql
+
+# --- run output ---------------------------------------------------------------
+logs/*
+!logs/.gitkeep
+results/*
+!results/.gitkeep
+
+# --- python -------------------------------------------------------------------
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# --- misc ---------------------------------------------------------------------
+.DS_Store
+*.swp

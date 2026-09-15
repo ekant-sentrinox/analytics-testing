@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# ---------------------------------------------------------------------------
+# SERVER 1 — pipeline exporter launcher. Rendered by scripts/deploy-agent.sh.
+# Invoked by systemd (bench-exporter.service).
+#
+# Exists for the same reason the collector's wrapper does: the catalog password
+# is read here from the file that already holds it and exported, so it is never
+# copied into a config or a systemd EnvironmentFile.
+#
+# Health mode is `ssh`: this process reads each host's local agent snapshot over
+# port 22 rather than scraping 8080/8081 across the network. That is what keeps
+# those ports closed in the security group.
+# ---------------------------------------------------------------------------
+set -euo pipefail
+
+PROJECT_DIR="@PROJECT_DIR@"
+cd "$PROJECT_DIR"
+
+if [ ! -r "@PG_PASSWORD_FILE@" ]; then
+  echo "fatal: catalog password file not readable: @PG_PASSWORD_FILE@" >&2
+  exit 78
+fi
+PG_PASSWORD="$(tr -d '\r\n' < "@PG_PASSWORD_FILE@")"
+export PG_PASSWORD
+
+export COLLECTOR_SSH_HOST="@COLLECTOR_SSH_HOST@"
+export COMPACTOR_SSH_HOST="@COMPACTOR_SSH_HOST@"
+export PG_HOST="@PG_HOST@"
+export PG_PORT="@PG_PORT@"
+export PG_DATABASE="@PG_DATABASE@"
+export PG_USER="@PG_USER@"
+export S3_BUCKET="@S3_BUCKET@"
+export S3_PREFIX="@S3_PREFIX@"
+export AWS_REGION="@AWS_REGION@"
+export DUCKLAKE_CATALOG="@DUCKLAKE_CATALOG@"
+export DUCKLAKE_SCHEMA="@DUCKLAKE_SCHEMA@"
+export DUCKLAKE_WATERMARK_TABLE="@DUCKLAKE_WATERMARK_TABLE@"
+export HOME="@HOME_DIR@"
+
+exec "$PROJECT_DIR/.venv/bin/python" \
+  "$PROJECT_DIR/monitoring/exporters/pipeline_exporter.py" \
+  --health-mode ssh \
+  --ssh-user "@SSH_USER@" \
+  --ssh-key "@SSH_KEY@" \
+  --port "@PIPELINE_EXPORTER_PORT@" \
+  --jsonl "$PROJECT_DIR/logs/pipeline.jsonl"

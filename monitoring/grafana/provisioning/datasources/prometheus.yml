@@ -1,0 +1,16 @@
+# Grafana datasource provisioning. Mounted read-only into the container.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    # Container-to-container on the compose network, not localhost.
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      # Match prometheus.yml's global scrape_interval so Grafana's auto step
+      # does not interpolate between points that were never measured.
+      timeInterval: 15s
+      httpMethod: POST

@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# ---------------------------------------------------------------------------
+# SERVER 2 — otel-collector launcher.  Rendered by scripts/deploy-collector.sh.
+# Invoked by systemd (@SYSTEMD_UNIT@); do not run it by hand except to debug.
+#
+# The catalog password is read here from @PG_PASSWORD_FILE@ and exported as
+# PG_PASSWORD, which the HOCON config resolves via ${PG_PASSWORD}. That is the
+# only reason this wrapper exists: it keeps the secret in the one file that
+# already holds it instead of copying it into a config or a systemd
+# EnvironmentFile.
+# ---------------------------------------------------------------------------
+set -euo pipefail
+
+BASE_DIR="@BASE_DIR@"
+REPO_DIR="@REPO_DIR@"
+MODULE="@MODULE@"
+
+export JAVA_HOME="${JAVA_HOME:-/usr/lib/jvm/java-21-amazon-corretto.x86_64}"
+export PATH="$JAVA_HOME/bin:$PATH"
+
+if [ ! -r "@PG_PASSWORD_FILE@" ]; then
+  echo "fatal: catalog password file not readable: @PG_PASSWORD_FILE@" >&2
+  exit 78    # EX_CONFIG
+fi
+PG_PASSWORD="$(tr -d '\r\n' < "@PG_PASSWORD_FILE@")"
+export PG_PASSWORD
+
+mkdir -p "@DUCKDB_TEMP_DIR@" "$BASE_DIR/logs" "$BASE_DIR/run"
+
+# DuckDB downloads extensions into $HOME/.duckdb on first use. systemd gives the
+# unit its own HOME, so pin it or every restart re-downloads.
+export HOME="${HOME:-/home/ec2-user}"
+
+CP="$BASE_DIR/conf:$REPO_DIR/$MODULE/target/classes:$REPO_DIR/$MODULE/target/lib/*"
+
+exec java \
+  -Xmx@JVM_MAX_HEAP@ \
+  @JVM_OPTS@ \
+  -Dconfig.file="$BASE_DIR/conf/application.conf" \
+  -cp "$CP" \
+  @MAIN_CLASS@ \
+  -c "$BASE_DIR/conf/application.conf"

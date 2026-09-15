@@ -1,0 +1,79 @@
+# ---------------------------------------------------------------------------
+# Prometheus scrape configuration. Runs in Docker on SERVER 1.
+#
+# What is scrapeable, and what is not, follows from how the pipeline is built:
+#
+#   generator          — this project. Exposes /metrics natively.        :9102
+#   pipeline_exporter  — this project. The ONLY source for collector and
+#                        compactor health, catalog backlog, visibility lag,
+#                        PostgreSQL stats, S3 growth, and the per-host
+#                        system metrics gathered by each bench-agent.      :9101
+#   node_exporter      — SERVER 1 only.                                    :9100
+#
+#   collector          — NOT SCRAPEABLE. Built with a SimpleMeterRegistry,
+#                        so its Micrometer meters live in process memory
+#                        with no exporter. /health is plain JSON, not
+#                        Prometheus text, and exposes only batchesProcessed.
+#   compactor          — NOT SCRAPEABLE, for the same reason
+#                        (LoggingMeterRegistry: its meters are log lines).
+#
+# HOW THEIR HEALTH GETS HERE WITHOUT OPENING A PORT
+#
+# bench-agent runs on each host and checks its own service over the LOOPBACK
+# (127.0.0.1:8081 on SERVER 2, 127.0.0.1:8080 on SERVER 3), then writes
+# state/health.json. pipeline_exporter reads those files over SSH (port 22,
+# already open) and republishes them here. So 8080 and 8081 need no inbound
+# security-group rule at all. See MONITORING_ARCHITECTURE.md.
+#
+# Do not add collector/compactor scrape targets here. They would require
+# opening those ports for no benefit, and would sit permanently DOWN today.
+# ---------------------------------------------------------------------------
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  scrape_timeout: 10s
+  external_labels:
+    project: analytics-distributed-test
+    environment: benchmark
+
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+scrape_configs:
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # The load generator. Only present while a test is running; `up == 0` between
+  # tests is expected, not a fault.
+  - job_name: generator
+    scrape_interval: 5s
+    static_configs:
+      - targets: ['host.docker.internal:9102']
+        labels: { server: 'server1', role: 'generator' }
+
+  # Everything about the pipeline that the pipeline itself does not export,
+  # including each host's agent state.
+  #
+  # NO `role` LABEL HERE. The exporter's own metrics already carry
+  # role="collector" / role="compactor", and a target label of the same name
+  # wins — Prometheus renames the real one to `exported_role` and every panel
+  # then shows "pipeline" for all three hosts. Observed, then fixed.
+  - job_name: pipeline
+    scrape_interval: 15s
+    static_configs:
+      - targets: ['host.docker.internal:9101']
+
+  # SERVER 1 only. There are deliberately NO node_exporter targets for SERVER 2
+  # or SERVER 3: that would need an inbound rule on 9100 for each, and the
+  # host-local bench-agent already reports their CPU, memory, disk and network
+  # (exposed here as bench_host_metric{role=...}) at 1 s resolution — finer than
+  # this scrape interval. A target that can never come up is worse than no
+  # target: it trains everyone to ignore a red dot.
+  - job_name: node
+    scrape_interval: 15s
+    static_configs:
+      - targets: ['host.docker.internal:9100']
+        labels: { server: 'server1' }

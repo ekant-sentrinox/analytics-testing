@@ -1,0 +1,122 @@
+# ---------------------------------------------------------------------------
+# SERVER 1 ONLY — the generator and the pipeline exporter.
+#
+# WHAT IS NOT HERE, AND WHY
+#
+#   The collector (SERVER 2) and the compactor (SERVER 3) are REMOTE services.
+#   They run under systemd on their own machines, deployed by
+#   scripts/deploy-collector.sh and scripts/deploy-compactor.sh. They are
+#   deliberately absent from this file. Compose could start containers named
+#   "collector" and "compactor" here, and they would run — on the wrong machine,
+#   competing with the generator for two vCPUs, and measuring nothing real.
+#
+#   PostgreSQL is also absent. The catalog is a shared RDS instance
+#   (config/postgres.yaml). Standing up a local PostgreSQL would replace the
+#   thing under test with a different thing.
+#
+# RUNNING THE GENERATOR IN DOCKER IS OPTIONAL. The normal path is
+# scripts/run-test.sh, which runs it in the project venv — one less layer
+# between the pacer and the network on a two-vCPU box. This file exists so the
+# generator can be run reproducibly, or several instances pointed at one
+# collector.
+#
+#   docker compose up -d pipeline-exporter      # the useful one
+#   docker compose run --rm generator --profile smoke
+# ---------------------------------------------------------------------------
+
+name: analytics-distributed-test
+
+services:
+
+  # -------------------------------------------------------------------------
+  # SERVER 1 — load generator. Profiled so `up` does not start it: a generator
+  # that starts with the stack would be sending traffic nobody asked for.
+  # -------------------------------------------------------------------------
+  generator:
+    profiles: ["manual"]
+    build:
+      context: .
+      dockerfile: generator/Dockerfile
+    image: analytics-bench/generator:0.1.0
+    container_name: bench-generator
+    restart: "no"
+    network_mode: host          # the pacer's timing should not cross a NAT
+    environment:
+      COLLECTOR_HOST: ${COLLECTOR_HOST:?set in .env}
+      COLLECTOR_GRPC_PORT: ${COLLECTOR_GRPC_PORT:-4317}
+      OTEL_JWT_SECRET_B64: ${OTEL_JWT_SECRET_B64:?run scripts/gen-secret.sh}
+      OTEL_INGESTION_QUEUE: ${OTEL_INGESTION_QUEUE:-logs}
+      GENERATOR_METRICS_PORT: ${GENERATOR_METRICS_PORT:-9102}
+      RESULTS_DIR: /work/results
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ./config:/work/config:ro
+      - ./results:/work/results
+      - ./logs:/work/logs
+    deploy:
+      resources:
+        limits:
+          # The host has 2 vCPU / 7.6 GiB. Leaving headroom matters: a generator
+          # that starves its own host produces stalls that look like pipeline
+          # backpressure.
+          cpus: "1.5"
+          memory: 2G
+    logging:
+      driver: json-file
+      options: { max-size: "20m", max-file: "5" }
+    command: ["--config", "/work/config/generator.yaml", "--profile", "smoke"]
+
+  # -------------------------------------------------------------------------
+  # SERVER 1 — pipeline exporter. The only Prometheus surface for the
+  # compactor, the catalog backlog, visibility lag and S3 growth.
+  # -------------------------------------------------------------------------
+  pipeline-exporter:
+    build:
+      context: .
+      dockerfile: generator/Dockerfile
+    image: analytics-bench/generator:0.1.0
+    container_name: bench-pipeline-exporter
+    restart: unless-stopped
+    network_mode: host
+    entrypoint: ["python", "-u", "/work/monitoring/exporters/pipeline_exporter.py"]
+    command:
+      - --jsonl
+      - /work/logs/pipeline.jsonl
+    environment:
+      COLLECTOR_HOST: ${COLLECTOR_HOST:?set in .env}
+      COLLECTOR_HEALTH_PORT: ${COLLECTOR_HEALTH_PORT:-8081}
+      COMPACTOR_HOST: ${COMPACTOR_HOST:?set in .env}
+      COMPACTOR_HEALTH_PORT: ${COMPACTOR_HEALTH_PORT:-8080}
+      PG_HOST: ${PG_HOST:?set in .env}
+      PG_PORT: ${PG_PORT:-5432}
+      PG_DATABASE: ${PG_DATABASE:-bench_catalog}
+      PG_USER: ${PG_USER:-analytics}
+      # Passed in from the host at `up` time, never baked into the image:
+      #   export PG_PASSWORD=$(cat ~/.config/sentrinox/analytics-perf-catalog.pw)
+      PG_PASSWORD: ${PG_PASSWORD:?export PG_PASSWORD before compose up}
+      S3_BUCKET: ${S3_BUCKET:?set in .env}
+      S3_PREFIX: ${S3_PREFIX:-bench}
+      AWS_REGION: ${AWS_REGION:-us-west-2}
+      DUCKLAKE_CATALOG: ${DUCKLAKE_CATALOG:-bench}
+      DUCKLAKE_SCHEMA: ${DUCKLAKE_SCHEMA:-main}
+      DUCKLAKE_WATERMARK_TABLE: ${DUCKLAKE_WATERMARK_TABLE:-ingest_watermark}
+      PIPELINE_EXPORTER_PORT: ${PIPELINE_EXPORTER_PORT:-9101}
+      # No access keys. S3 auth is the EC2 instance role via IMDS, which
+      # host networking makes reachable from inside the container.
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ./config:/work/config:ro
+      - ./logs:/work/logs
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,os;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PIPELINE_EXPORTER_PORT','9101')+'/metrics',timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: 512M }
+    logging:
+      driver: json-file
+      options: { max-size: "20m", max-file: "3" }

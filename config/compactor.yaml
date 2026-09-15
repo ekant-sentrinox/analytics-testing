@@ -1,0 +1,54 @@
+# ---------------------------------------------------------------------------
+# SERVER 3 — dazzleduck-sql-ducklake-compactor.
+#
+# Consumed by scripts/deploy-compactor.sh.
+# ---------------------------------------------------------------------------
+
+compactor:
+  host: ${COMPACTOR_HOST}
+  health_port: ${COMPACTOR_HEALTH_PORT}
+
+  install:
+    base_dir: /opt/analytics-bench/compactor      # conf/ bin/ logs/ run/
+    repo_dir: /home/ec2-user/dazzleduck-sql-server
+    module: dazzleduck-sql-ducklake-compactor
+    main_class: io.dazzleduck.sql.compaction.Main
+    systemd_unit: bench-compactor.service
+    log_file: /opt/analytics-bench/compactor/logs/compactor.log
+
+  jvm:
+    max_heap: 2g
+    opts: >-
+      -XX:+UseG1GC
+      -XX:MaxGCPauseMillis=200
+      -XX:+ExitOnOutOfMemoryError
+      -Xlog:gc*:file=/opt/analytics-bench/compactor/logs/gc.log:time,uptime:filecount=5,filesize=20M
+      --add-opens=java.base/java.nio=ALL-UNNAMED
+      --add-opens=java.base/sun.nio.ch=ALL-UNNAMED
+
+  # -------------------------------------------------------------------------
+  # Schedules. The defaults shipped by the module are 1 minute / 1 hour; the
+  # major frequency is shortened here so a 10-minute staircase step can observe
+  # several major cycles. If you lengthen a step, lengthen these in proportion
+  # rather than leaving a step that contains no major run at all.
+  #
+  # Scheduler detail worth knowing before reading results: in
+  # CompactionService.runCompaction a due MAJOR run REPLACES that tick's minor
+  # run — it does not run alongside it. A single compactor therefore never
+  # produces genuinely concurrent minor+major activity. See TEST_SCENARIOS.md.
+  # -------------------------------------------------------------------------
+  schedule:
+    minor_compaction_frequency: 1 minute
+    major_compaction_frequency: 10 minutes
+    housekeeping_frequency: 5 minutes
+    snapshot_retention: 15 minutes
+
+  sizes:
+    # Files smaller than this are candidates for a minor merge.
+    minor_compaction_max_size: 96MB   # peak: 1.5x the 64 MiB bucket (was 48MB)
+    major_compaction_max_size: 256MB  # peak: tier above 96MB minor (was 128MB)
+
+  duckdb:
+    threads: 2
+    memory_limit: 2GB
+    temp_directory: /var/tmp/duckdb-compactor

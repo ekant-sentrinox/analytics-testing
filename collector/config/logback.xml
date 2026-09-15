@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Installed into the collector's conf/ directory, which is first on the
+  classpath, so it shadows any logback config shipped in the module.
+
+  Why this exists: the module's default configuration logs at DEBUG, and gRPC
+  and Netty are extremely chatty at that level — the first start produced 42 KB
+  of log before a single record arrived. Under load that is disk I/O and CPU
+  competing with the thing being measured, on a box with two vCPUs. A benchmark
+  that logs at DEBUG is measuring logback.
+
+  Keep the DazzleDuck loggers at INFO so lifecycle, flush and catalog-commit
+  events are still visible; silence the transport.
+-->
+<configuration scan="false">
+
+  <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+    <file>/opt/analytics-bench/collector/logs/collector.log</file>
+    <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+      <fileNamePattern>/opt/analytics-bench/collector/logs/collector.%d{yyyy-MM-dd}.%i.log.gz</fileNamePattern>
+      <maxFileSize>50MB</maxFileSize>
+      <maxHistory>7</maxHistory>
+      <totalSizeCap>500MB</totalSizeCap>
+    </rollingPolicy>
+    <encoder>
+      <pattern>%d{yyyy-MM-dd'T'HH:mm:ss.SSS,UTC}Z %-5level [%thread] %logger{36} - %msg%n</pattern>
+    </encoder>
+    <!-- Never block the ingest path to write a log line. -->
+    <immediateFlush>false</immediateFlush>
+  </appender>
+
+  <appender name="ASYNC" class="ch.qos.logback.classic.AsyncAppender">
+    <queueSize>4096</queueSize>
+    <!-- Drop rather than stall the caller when the queue fills. A dropped log
+         line is a smaller lie than a latency spike that logging caused. -->
+    <discardingThreshold>512</discardingThreshold>
+    <neverBlock>true</neverBlock>
+    <appender-ref ref="FILE"/>
+  </appender>
+
+  <logger name="io.grpc"           level="WARN"/>
+  <logger name="io.netty"          level="WARN"/>
+  <logger name="org.apache.arrow"  level="WARN"/>
+  <logger name="io.dazzleduck"     level="INFO"/>
+
+  <root level="INFO">
+    <appender-ref ref="ASYNC"/>
+  </root>
+</configuration>
