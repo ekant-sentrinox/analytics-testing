@@ -1,7 +1,7 @@
 {
   "uid": "bench-compactor",
   "title": "Compactor (SERVER 3)",
-  "description": "DuckLake merge activity, file-size distribution and housekeeping.",
+  "description": "Two-tier DuckLake compaction: per-tier activity, failure signals, file-size bands and housekeeping.",
   "tags": [
     "benchmark",
     "compactor"
@@ -32,34 +32,34 @@
   "panels": [
     {
       "type": "text",
-      "title": "Scheduler behaviour worth knowing before reading these numbers",
+      "title": "Two JVMs, one catalog \u2014 how to read this",
       "gridPos": {
-        "h": 5,
+        "h": 6,
         "w": 24,
         "x": 0,
         "y": 0
       },
       "options": {
         "mode": "markdown",
-        "content": "In `CompactionService.runCompaction`, a **major run replaces that tick's minor run** \u2014 it does not run alongside it. A single compactor therefore never produces concurrent minor and major activity, and any claim of \"concurrent compaction\" from a single-instance run is wrong. See `TEST_SCENARIOS.md`.\n\nThe compactor uses a `LoggingMeterRegistry`, so merge *durations* are log lines, not metrics. They are parsed out into `raw/compaction.jsonl` at collection time and appear in the generated report, not here."
+        "content": "Since 2026-09-17 compaction is **split across two services** on SERVER 3: `bench-compactor` owns the **minor** tier (files in [0, 12 MB), 1 s cadence, health :8080) and `bench-compactor-major` owns the **major** tier ([12 MB, 64 MB), 5 min cadence, health :8090). Every per-tier metric here comes from the service that owns the tier.\n\n**Health reports UP even when every cycle fails** \u2014 it is process liveness, not compaction success. *Failed cycles* and *time since last success* are the real signals. Files **\u2265 64 MB sit above every band and nothing compacts them**; the band panels below make that population visible.\n\nMerge *durations* are still log lines (`LoggingMeterRegistry`), parsed into `raw/compaction.jsonl` at collection time \u2014 they appear in the generated report, not here."
       }
     },
     {
       "type": "row",
-      "title": "Activity",
+      "title": "Tier services",
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 5
+        "y": 6
       },
       "collapsed": false,
       "panels": []
     },
     {
       "type": "stat",
-      "title": "Compactor",
-      "description": "",
+      "title": "Minor tier",
+      "description": "The [0, 12 MB) band. systemd bench-compactor, health :8080.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -68,7 +68,7 @@
         "h": 4,
         "w": 4,
         "x": 0,
-        "y": 6
+        "y": 7
       },
       "targets": [
         {
@@ -76,8 +76,8 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "bench_compactor_up",
-          "legendFormat": "Compactor",
+          "expr": "bench_compactor_tier_up{tier=\"minor\"}",
+          "legendFormat": "Minor tier",
           "refId": "A",
           "editorMode": "code",
           "range": true
@@ -121,7 +121,7 @@
     },
     {
       "type": "stat",
-      "title": "Uptime",
+      "title": "Minor uptime",
       "description": "",
       "datasource": {
         "type": "prometheus",
@@ -131,7 +131,7 @@
         "h": 4,
         "w": 4,
         "x": 4,
-        "y": 6
+        "y": 7
       },
       "targets": [
         {
@@ -139,8 +139,8 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "bench_compactor_uptime_seconds",
-          "legendFormat": "Uptime",
+          "expr": "bench_compactor_tier_uptime_seconds{tier=\"minor\"}",
+          "legendFormat": "Minor uptime",
           "refId": "A",
           "editorMode": "code",
           "range": true
@@ -180,8 +180,8 @@
     },
     {
       "type": "stat",
-      "title": "Minor runs",
-      "description": "",
+      "title": "Major tier",
+      "description": "The [12 MB, 64 MB) band. systemd bench-compactor-major, health :8090.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -190,7 +190,7 @@
         "h": 4,
         "w": 4,
         "x": 8,
-        "y": 6
+        "y": 7
       },
       "targets": [
         {
@@ -198,8 +198,8 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "sum(bench_compaction_minor_total)",
-          "legendFormat": "Minor runs",
+          "expr": "bench_compactor_tier_up{tier=\"major\"}",
+          "legendFormat": "Major tier",
           "refId": "A",
           "editorMode": "code",
           "range": true
@@ -208,6 +208,69 @@
       "fieldConfig": {
         "defaults": {
           "unit": "short",
+          "decimals": null,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#6b7d8f",
+                "value": null
+              },
+              {
+                "color": "#4f8a6a",
+                "value": 1
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "value",
+        "reduceOptions": {
+          "calcs": [
+            "lastNonNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Major uptime",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 12,
+        "y": 7
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "bench_compactor_tier_uptime_seconds{tier=\"major\"}",
+          "legendFormat": "Major uptime",
+          "refId": "A",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
           "decimals": null,
           "thresholds": {
             "mode": "absolute",
@@ -239,8 +302,8 @@
     },
     {
       "type": "stat",
-      "title": "Major runs",
-      "description": "",
+      "title": "Failed cycles",
+      "description": "Both tiers, since each service's last restart. Health stays UP through these \u2014 this number is the success signal, not the UP stat.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -248,8 +311,8 @@
       "gridPos": {
         "h": 4,
         "w": 4,
-        "x": 12,
-        "y": 6
+        "x": 16,
+        "y": 7
       },
       "targets": [
         {
@@ -257,8 +320,8 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "sum(bench_compaction_major_total)",
-          "legendFormat": "Major runs",
+          "expr": "sum(bench_compaction_tier_failed_cycles_total)",
+          "legendFormat": "Failed cycles",
           "refId": "A",
           "editorMode": "code",
           "range": true
@@ -274,6 +337,14 @@
               {
                 "color": "#6b7d8f",
                 "value": null
+              },
+              {
+                "color": "#c39b4e",
+                "value": 1
+              },
+              {
+                "color": "#b4553f",
+                "value": 10
               }
             ]
           },
@@ -299,7 +370,7 @@
     {
       "type": "stat",
       "title": "Files merged",
-      "description": "Cumulative. Flat while small files accumulate means compaction is running but finding nothing to do \u2014 check the threshold against actual file sizes.",
+      "description": "Both tiers, since each service's last restart. Flat while small files accumulate means compaction runs but finds nothing mergeable.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -307,8 +378,8 @@
       "gridPos": {
         "h": 4,
         "w": 4,
-        "x": 16,
-        "y": 6
+        "x": 20,
+        "y": 7
       },
       "targets": [
         {
@@ -316,7 +387,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "sum(bench_compaction_files_compacted_total)",
+          "expr": "sum(bench_compaction_tier_files_compacted_total)",
           "legendFormat": "Files merged",
           "refId": "A",
           "editorMode": "code",
@@ -356,76 +427,21 @@
       }
     },
     {
-      "type": "stat",
-      "title": "Small files now",
-      "description": "",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
+      "type": "row",
+      "title": "Compaction activity by type",
       "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 20,
-        "y": 6
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 11
       },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "expr": "sum(bench_compactor_files_small)",
-          "legendFormat": "Small files now",
-          "refId": "A",
-          "editorMode": "code",
-          "range": true
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "decimals": null,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "#6b7d8f",
-                "value": null
-              },
-              {
-                "color": "#c39b4e",
-                "value": 100
-              },
-              {
-                "color": "#b4553f",
-                "value": 1000
-              }
-            ]
-          },
-          "color": {
-            "mode": "thresholds"
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "textMode": "auto",
-        "reduceOptions": {
-          "calcs": [
-            "lastNonNull"
-          ],
-          "fields": "",
-          "values": false
-        }
-      }
+      "collapsed": false,
+      "panels": []
     },
     {
       "type": "timeseries",
-      "title": "Compaction runs (cumulative)",
-      "description": "",
+      "title": "Cycles by type (cumulative)",
+      "description": "Counts reset when a tier's service restarts. Minor ticks every second and only runs when its band has work; major runs every 5 minutes.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -434,7 +450,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 10
+        "y": 12
       },
       "targets": [
         {
@@ -442,8 +458,8 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "bench_compaction_minor_total",
-          "legendFormat": "minor {{database}}",
+          "expr": "bench_compaction_tier_cycles_total{tier=\"minor\"}",
+          "legendFormat": "minor",
           "refId": "A",
           "editorMode": "code",
           "range": true
@@ -453,74 +469,9 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "bench_compaction_major_total",
-          "legendFormat": "major {{database}}",
+          "expr": "bench_compaction_tier_cycles_total{tier=\"major\"}",
+          "legendFormat": "major",
           "refId": "B",
-          "editorMode": "code",
-          "range": true
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "min": 0,
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 1.5,
-            "fillOpacity": 6,
-            "showPoints": "never",
-            "spanNulls": false,
-            "stacking": {
-              "mode": "none",
-              "group": "A"
-            },
-            "axisSoftMax": null,
-            "gradientMode": "opacity"
-          },
-          "color": {
-            "mode": "palette-classic"
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "calcs": [
-            "mean",
-            "max"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      }
-    },
-    {
-      "type": "timeseries",
-      "title": "Files merged (rate)",
-      "description": "The drain rate. Compare against how fast the collector creates files: if this is lower for a sustained period, the backlog grows without bound.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 10
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "expr": "rate(bench_compaction_files_compacted_total[5m]) * 60",
-          "legendFormat": "files/min {{database}}",
-          "refId": "A",
           "editorMode": "code",
           "range": true
         }
@@ -550,7 +501,343 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "files/min bench"
+              "options": "minor"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#2f7d95"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "major"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#8a6fa8"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Files merged per minute, by type",
+      "description": "The drain rate per tier. If the sum stays below the collector's file creation rate for long, the backlog grows without bound.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 12
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "rate(bench_compaction_tier_files_compacted_total{tier=\"minor\"}[10m]) * 60",
+          "legendFormat": "minor",
+          "refId": "A",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "rate(bench_compaction_tier_files_compacted_total{tier=\"major\"}[10m]) * 60",
+          "legendFormat": "major",
+          "refId": "B",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1.5,
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisSoftMax": null,
+            "gradientMode": "opacity"
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "minor"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#2f7d95"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "major"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#8a6fa8"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Time since last successful cycle",
+      "description": "The liveness signal health cannot give you. Minor should stay under ~2 min; major under ~10 min (its cadence is 5 min). A climbing line while the UP stat is green is exactly the stale-credential failure mode.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 20
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "bench_compaction_tier_last_success_age_seconds{tier=\"minor\"}",
+          "legendFormat": "minor",
+          "refId": "A",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "bench_compaction_tier_last_success_age_seconds{tier=\"major\"}",
+          "legendFormat": "major",
+          "refId": "B",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1.5,
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisSoftMax": null,
+            "gradientMode": "opacity"
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "minor"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#2f7d95"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "major"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#8a6fa8"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Failed cycles by type (cumulative)",
+      "description": "Any sustained slope here is an incident, whatever health says.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 20
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "bench_compaction_tier_failed_cycles_total{tier=\"minor\"}",
+          "legendFormat": "minor",
+          "refId": "A",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "bench_compaction_tier_failed_cycles_total{tier=\"major\"}",
+          "legendFormat": "major",
+          "refId": "B",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1.5,
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisSoftMax": null,
+            "gradientMode": "opacity"
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "minor"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#2f7d95"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "major"
             },
             "properties": [
               {
@@ -581,20 +868,20 @@
     },
     {
       "type": "row",
-      "title": "File-size distribution \u2014 what compaction is fixing",
+      "title": "File-size bands \u2014 what compaction is fixing",
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 18
+        "y": 28
       },
       "collapsed": false,
       "panels": []
     },
     {
       "type": "timeseries",
-      "title": "File counts by size class",
-      "description": "",
+      "title": "Live files by band (catalog truth)",
+      "description": "Counted straight from ducklake_data_file, same bands the tiers use. The large series only ever grows: major's own output lands there and no tier touches it again.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -603,7 +890,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 19
+        "y": 29
       },
       "targets": [
         {
@@ -611,8 +898,8 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "bench_compactor_files_small",
-          "legendFormat": "small (< minor threshold)",
+          "expr": "bench_catalog_files_by_band{band=\"small\"}",
+          "legendFormat": "small [0\u201312 MB) \u2014 minor band",
           "refId": "A",
           "editorMode": "code",
           "range": true
@@ -622,8 +909,8 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "bench_compactor_files_medium",
-          "legendFormat": "medium",
+          "expr": "bench_catalog_files_by_band{band=\"medium\"}",
+          "legendFormat": "medium [12\u201364 MB) \u2014 major band",
           "refId": "B",
           "editorMode": "code",
           "range": true
@@ -633,8 +920,8 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "bench_compactor_files_total",
-          "legendFormat": "total",
+          "expr": "bench_catalog_files_by_band{band=\"large\"}",
+          "legendFormat": "large \u2265 64 MB \u2014 nothing compacts these",
           "refId": "C",
           "editorMode": "code",
           "range": true
@@ -665,14 +952,14 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "small (< minor threshold)"
+              "options": "small [0\u201312 MB) \u2014 minor band"
             },
             "properties": [
               {
                 "id": "color",
                 "value": {
                   "mode": "fixed",
-                  "fixedColor": "#b4553f"
+                  "fixedColor": "#2f7d95"
                 }
               }
             ]
@@ -680,7 +967,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "medium"
+              "options": "medium [12\u201364 MB) \u2014 major band"
             },
             "properties": [
               {
@@ -695,14 +982,254 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "total"
+              "options": "large \u2265 64 MB \u2014 nothing compacts these"
             },
             "properties": [
               {
                 "id": "color",
                 "value": {
                   "mode": "fixed",
-                  "fixedColor": "#6b7d8f"
+                  "fixedColor": "#b4553f"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Live bytes by band",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 29
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "bench_catalog_bytes_by_band{band=\"small\"}",
+          "legendFormat": "small [0\u201312 MB)",
+          "refId": "A",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "bench_catalog_bytes_by_band{band=\"medium\"}",
+          "legendFormat": "medium [12\u201364 MB)",
+          "refId": "B",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "bench_catalog_bytes_by_band{band=\"large\"}",
+          "legendFormat": "large \u2265 64 MB",
+          "refId": "C",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1.5,
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisSoftMax": null,
+            "gradientMode": "opacity"
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "small [0\u201312 MB)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#2f7d95"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "medium [12\u201364 MB)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#c39b4e"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "large \u2265 64 MB"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#b4553f"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Band inventory as each tier sees it",
+      "description": "Each service's own count of files inside its band, from /health. Should track the catalog panels; divergence means a tier's view is stale.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 37
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "bench_compactor_tier_band_files{tier=\"minor\"}",
+          "legendFormat": "minor",
+          "refId": "A",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "bench_compactor_tier_band_files{tier=\"major\"}",
+          "legendFormat": "major",
+          "refId": "B",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1.5,
+            "fillOpacity": 6,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisSoftMax": null,
+            "gradientMode": "opacity"
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "minor"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#2f7d95"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "major"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#8a6fa8"
                 }
               }
             ]
@@ -736,7 +1263,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 19
+        "y": 37
       },
       "targets": [
         {
@@ -807,12 +1334,12 @@
     },
     {
       "type": "row",
-      "title": "Housekeeping",
+      "title": "Housekeeping \u2014 runs in the minor JVM only",
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 27
+        "y": 45
       },
       "collapsed": false,
       "panels": []
@@ -820,7 +1347,7 @@
     {
       "type": "timeseries",
       "title": "Snapshots retained",
-      "description": "expire_snapshots trims these to snapshot_retention. Unbounded growth means housekeeping is not running.",
+      "description": "expire_snapshots trims these to snapshot_retention (15 min). It runs in bench-compactor only; the major service parks housekeeping at 30 days so the two never race on the catalog. Unbounded growth = not running.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -829,7 +1356,7 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 28
+        "y": 46
       },
       "targets": [
         {
@@ -910,7 +1437,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 28
+        "y": 46
       },
       "targets": [
         {

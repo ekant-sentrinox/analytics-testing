@@ -508,3 +508,38 @@ rather than silently under-reporting.
   (`hs_err_pid502076.log` in its directory) — a real finding to file upstream.
   `totalMajorCompactions` on the main compactor is 0 and medium-file count grows
   until a major tier runs.
+
+### RAMP / PEAK-STABLE TEST — ai_txn workload (2026-09-17, in progress)
+
+Goal: highest **sustainable** eps (accepted held with a flat backlog), then prove
+it for 24 h. Levels run 1 h each, advancing only on passing stability gates. Full
+report: `report/RAMP_STABILITY_TEST_2026-09-17.md`; services/system findings:
+`FINDINGS_AND_RECOMMENDATIONS_2026-09-17.md`.
+
+Ramp results (ai_txn payload, direct transport, two-tier compactor):
+
+| Load | Accepted ratio | Backlog | Watermark lag | Failed cycles | Stable? |
+|---|---|---|---|---|---|
+| 5,000  | 0.99 | draining (1236→905 files) | ~9 s flat | 0/0 | **YES** |
+| 10,000 | 0.98 | flat (944→954) | ~14 s flat | 0/0 | **YES** |
+| 15,000 | **0.61** | flat | ~20 s (bounded) | 0/0 | **NO — capped ~10 k** |
+
+- **Peak stable ≈ 10,000 eps** (knee probes 12k/13k + 24 h soak running via the
+  `ramp-driver` systemd unit; results appended to the report and `~/ramp-driver.log`).
+- **The ceiling is NOT CPU** — at 15k target the generator sits at ~35 % of one
+  core (not GIL-bound, unlike the 2026-09-15 generic-payload 25k run), collector
+  ~2/8 cores, compactor ~25 %. It is the collector's **durable-commit rate for the
+  heavier ai_txn record, bound by S3 flush/commit latency**. ~10 k here is not a
+  regression from the 25 k generic figure — different, heavier workload.
+- **First metric to signal the ceiling:** accepted ratio (0.98 → 0.61), not any
+  compaction metric — minor/major stayed 0 failed cycles throughout.
+- **Compaction never fell behind** in 5k–15k; the only monotonic growth is the
+  **≥64 MB "large" band** (nothing compacts it — see finding F2).
+- **One environment change, made before the test:** credential-refresh drop-in on
+  `bench-compactor-major` (it lacked the 4 h RuntimeMaxSec the minor tier already
+  had) — required for validity past ~6 h. Both tiers now auto-restart every 4 h;
+  those restarts are expected in soak data, not instability.
+- Monitoring fixed en route: pipeline exporter (renamed watermark table + new
+  per-tier `/health` format) and a rebuilt Grafana **compactor dashboard** showing
+  compaction **by type** (minor/major cycles, files merged, failed cycles, time
+  since last success, small/medium/large bands).

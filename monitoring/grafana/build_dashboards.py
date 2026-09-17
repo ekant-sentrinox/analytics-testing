@@ -354,73 +354,127 @@ def d_collector():
 # ---------------------------------------------------------------------------
 # 4. compactor
 # ---------------------------------------------------------------------------
+TIER_COLORS = {"minor": COLORS["accepted"], "major": COLORS["compactor"]}
+
+
 def d_compactor():
     p = [
-        text_panel("Scheduler behaviour worth knowing before reading these numbers", (
-            "In `CompactionService.runCompaction`, a **major run replaces that tick's minor "
-            "run** — it does not run alongside it. A single compactor therefore never "
-            "produces concurrent minor and major activity, and any claim of \"concurrent "
-            "compaction\" from a single-instance run is wrong. See `TEST_SCENARIOS.md`.\n\n"
-            "The compactor uses a `LoggingMeterRegistry`, so merge *durations* are log lines, "
-            "not metrics. They are parsed out into `raw/compaction.jsonl` at collection time "
-            "and appear in the generated report, not here."
-        ), h=5, y=0),
+        text_panel("Two JVMs, one catalog — how to read this", (
+            "Since 2026-09-17 compaction is **split across two services** on SERVER 3: "
+            "`bench-compactor` owns the **minor** tier (files in [0, 12 MB), 1 s cadence, "
+            "health :8080) and `bench-compactor-major` owns the **major** tier "
+            "([12 MB, 64 MB), 5 min cadence, health :8090). Every per-tier metric here "
+            "comes from the service that owns the tier.\n\n"
+            "**Health reports UP even when every cycle fails** — it is process liveness, "
+            "not compaction success. *Failed cycles* and *time since last success* are the "
+            "real signals. Files **≥ 64 MB sit above every band and nothing compacts them**; "
+            "the band panels below make that population visible.\n\n"
+            "Merge *durations* are still log lines (`LoggingMeterRegistry`), parsed into "
+            "`raw/compaction.jsonl` at collection time — they appear in the generated "
+            "report, not here."
+        ), h=6, y=0),
 
-        row("Activity", 5),
-        stat("Compactor", "bench_compactor_up", "short", 4, 4, 0, 6,
-             thresholds=[(1, COLORS["good"])], text_mode="value"),
-        stat("Uptime", "bench_compactor_uptime_seconds", "s", 4, 4, 4, 6),
-        stat("Minor runs", "sum(bench_compaction_minor_total)", "short", 4, 4, 8, 6),
-        stat("Major runs", "sum(bench_compaction_major_total)", "short", 4, 4, 12, 6),
-        stat("Files merged", "sum(bench_compaction_files_compacted_total)", "short", 4, 4, 16, 6,
-             desc="Cumulative. Flat while small files accumulate means compaction is running "
-                  "but finding nothing to do — check the threshold against actual file sizes."),
-        stat("Small files now", "sum(bench_compactor_files_small)", "short", 4, 4, 20, 6,
-             thresholds=[(100, COLORS["warn"]), (1000, COLORS["bad"])]),
+        row("Tier services", 6),
+        stat("Minor tier", 'bench_compactor_tier_up{tier="minor"}', "short", 4, 4, 0, 7,
+             thresholds=[(1, COLORS["good"])], text_mode="value",
+             desc="The [0, 12 MB) band. systemd bench-compactor, health :8080."),
+        stat("Minor uptime", 'bench_compactor_tier_uptime_seconds{tier="minor"}', "s", 4, 4, 4, 7),
+        stat("Major tier", 'bench_compactor_tier_up{tier="major"}', "short", 4, 4, 8, 7,
+             thresholds=[(1, COLORS["good"])], text_mode="value",
+             desc="The [12 MB, 64 MB) band. systemd bench-compactor-major, health :8090."),
+        stat("Major uptime", 'bench_compactor_tier_uptime_seconds{tier="major"}', "s", 4, 4, 12, 7),
+        stat("Failed cycles", "sum(bench_compaction_tier_failed_cycles_total)", "short", 4, 4, 16, 7,
+             thresholds=[(1, COLORS["warn"]), (10, COLORS["bad"])],
+             desc="Both tiers, since each service's last restart. Health stays UP through "
+                  "these — this number is the success signal, not the UP stat."),
+        stat("Files merged", "sum(bench_compaction_tier_files_compacted_total)", "short", 4, 4, 20, 7,
+             desc="Both tiers, since each service's last restart. Flat while small files "
+                  "accumulate means compaction runs but finds nothing mergeable."),
 
-        timeseries("Compaction runs (cumulative)", [
-            ("bench_compaction_minor_total", "minor {{database}}"),
-            ("bench_compaction_major_total", "major {{database}}"),
-        ], "short", 12, 8, 0, 10, minimum=0),
-        timeseries("Files merged (rate)", [
-            ("rate(bench_compaction_files_compacted_total[5m]) * 60", "files/min {{database}}"),
-        ], "short", 12, 8, 12, 10,
-            desc="The drain rate. Compare against how fast the collector creates files: if "
-                 "this is lower for a sustained period, the backlog grows without bound.",
-            colours={"files/min bench": COLORS["compactor"]}, minimum=0),
+        row("Compaction activity by type", 11),
+        timeseries("Cycles by type (cumulative)", [
+            ('bench_compaction_tier_cycles_total{tier="minor"}', "minor"),
+            ('bench_compaction_tier_cycles_total{tier="major"}', "major"),
+        ], "short", 12, 8, 0, 12,
+            desc="Counts reset when a tier's service restarts. Minor ticks every second and "
+                 "only runs when its band has work; major runs every 5 minutes.",
+            colours=TIER_COLORS, minimum=0),
+        timeseries("Files merged per minute, by type", [
+            ('rate(bench_compaction_tier_files_compacted_total{tier="minor"}[10m]) * 60', "minor"),
+            ('rate(bench_compaction_tier_files_compacted_total{tier="major"}[10m]) * 60', "major"),
+        ], "short", 12, 8, 12, 12,
+            desc="The drain rate per tier. If the sum stays below the collector's file "
+                 "creation rate for long, the backlog grows without bound.",
+            colours=TIER_COLORS, minimum=0),
+        timeseries("Time since last successful cycle", [
+            ('bench_compaction_tier_last_success_age_seconds{tier="minor"}', "minor"),
+            ('bench_compaction_tier_last_success_age_seconds{tier="major"}', "major"),
+        ], "s", 12, 8, 0, 20,
+            desc="The liveness signal health cannot give you. Minor should stay under ~2 min; "
+                 "major under ~10 min (its cadence is 5 min). A climbing line while the UP "
+                 "stat is green is exactly the stale-credential failure mode.",
+            colours=TIER_COLORS, minimum=0),
+        timeseries("Failed cycles by type (cumulative)", [
+            ('bench_compaction_tier_failed_cycles_total{tier="minor"}', "minor"),
+            ('bench_compaction_tier_failed_cycles_total{tier="major"}', "major"),
+        ], "short", 12, 8, 12, 20,
+            desc="Any sustained slope here is an incident, whatever health says.",
+            colours=TIER_COLORS, minimum=0),
 
-        row("File-size distribution — what compaction is fixing", 18),
-        timeseries("File counts by size class", [
-            ("bench_compactor_files_small", "small (< minor threshold)"),
-            ("bench_compactor_files_medium", "medium"),
-            ("bench_compactor_files_total", "total"),
-        ], "short", 12, 8, 0, 19,
-            colours={"small (< minor threshold)": COLORS["rejected"],
-                     "medium": COLORS["warn"], "total": COLORS["neutral"]},
+        row("File-size bands — what compaction is fixing", 28),
+        timeseries("Live files by band (catalog truth)", [
+            ('bench_catalog_files_by_band{band="small"}', "small [0–12 MB) — minor band"),
+            ('bench_catalog_files_by_band{band="medium"}', "medium [12–64 MB) — major band"),
+            ('bench_catalog_files_by_band{band="large"}', "large ≥ 64 MB — nothing compacts these"),
+        ], "short", 12, 8, 0, 29,
+            desc="Counted straight from ducklake_data_file, same bands the tiers use. The "
+                 "large series only ever grows: major's own output lands there and no tier "
+                 "touches it again.",
+            colours={"small [0–12 MB) — minor band": COLORS["accepted"],
+                     "medium [12–64 MB) — major band": COLORS["warn"],
+                     "large ≥ 64 MB — nothing compacts these": COLORS["bad"]},
             minimum=0),
+        timeseries("Live bytes by band", [
+            ('bench_catalog_bytes_by_band{band="small"}', "small [0–12 MB)"),
+            ('bench_catalog_bytes_by_band{band="medium"}', "medium [12–64 MB)"),
+            ('bench_catalog_bytes_by_band{band="large"}', "large ≥ 64 MB"),
+        ], "bytes", 12, 8, 12, 29,
+            colours={"small [0–12 MB)": COLORS["accepted"],
+                     "medium [12–64 MB)": COLORS["warn"],
+                     "large ≥ 64 MB": COLORS["bad"]},
+            minimum=0),
+        timeseries("Band inventory as each tier sees it", [
+            ('bench_compactor_tier_band_files{tier="minor"}', "minor"),
+            ('bench_compactor_tier_band_files{tier="major"}', "major"),
+        ], "short", 12, 8, 0, 37,
+            desc="Each service's own count of files inside its band, from /health. Should "
+                 "track the catalog panels; divergence means a tier's view is stale.",
+            colours=TIER_COLORS, minimum=0),
         timeseries("Mean live file size", [
             ("bench:mean_live_file_bytes", "mean"),
-        ], "bytes", 12, 8, 12, 19,
+        ], "bytes", 12, 8, 12, 37,
             desc="Should trend up while compaction runs and there is a backlog to merge. "
                  "Flat and small means merges are not happening or not helping.",
             colours={"mean": COLORS["compactor"]}, minimum=0),
 
-        row("Housekeeping", 27),
+        row("Housekeeping — runs in the minor JVM only", 45),
         timeseries("Snapshots retained", [
             ("bench_catalog_snapshots", "snapshots"),
-        ], "short", 12, 7, 0, 28,
-            desc="expire_snapshots trims these to snapshot_retention. Unbounded growth means "
-                 "housekeeping is not running.",
+        ], "short", 12, 7, 0, 46,
+            desc="expire_snapshots trims these to snapshot_retention (15 min). It runs in "
+                 "bench-compactor only; the major service parks housekeeping at 30 days so "
+                 "the two never race on the catalog. Unbounded growth = not running.",
             colours={"snapshots": COLORS["neutral"]}, minimum=0),
         timeseries("S3 objects under the prefix", [
             ("bench_s3_objects", "objects"),
-        ], "short", 12, 7, 12, 28,
+        ], "short", 12, 7, 12, 46,
             desc="Should fall after cleanup_old_files reclaims files superseded by a merge. "
                  "Objects far above live files = orphans awaiting cleanup.",
             colours={"objects": COLORS["accepted"]}, minimum=0),
     ]
     return dashboard("bench-compactor", "Compactor (SERVER 3)",
-                     "DuckLake merge activity, file-size distribution and housekeeping.",
+                     "Two-tier DuckLake compaction: per-tier activity, failure signals, "
+                     "file-size bands and housekeeping.",
                      p, ["compactor"])
 
 

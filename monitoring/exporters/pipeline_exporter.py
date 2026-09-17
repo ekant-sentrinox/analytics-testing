@@ -31,6 +31,7 @@ a recorded failure, never a silently missing sample.
 from __future__ import annotations
 
 import argparse
+import calendar
 import json
 import logging
 import os
@@ -90,6 +91,17 @@ WHERE end_snapshot IS NULL
   AND file_size_bytes < %(threshold)s
 """
 
+SQL_FILES_BY_BAND = """
+SELECT CASE WHEN file_size_bytes < %(minor_max)s THEN 'small'
+            WHEN file_size_bytes < %(major_max)s THEN 'medium'
+            ELSE 'large' END                     AS band,
+       count(*)                                  AS files,
+       COALESCE(sum(file_size_bytes), 0)         AS bytes
+FROM ducklake_data_file
+WHERE end_snapshot IS NULL
+GROUP BY 1
+"""
+
 SQL_SNAPSHOTS = "SELECT count(*), COALESCE(max(snapshot_id), 0) FROM ducklake_snapshot"
 
 SQL_PG_STATS = """
@@ -128,6 +140,35 @@ class Prom:
                              ["database"])
         self.files_medium = g("bench_compactor_files_medium", "Medium files", ["database"])
         self.files_total = g("bench_compactor_files_total", "Total live files", ["database"])
+
+        # --- two-tier split (2026-09-17): one JVM per tier, each with its own
+        # /health. Every gauge below carries the tier that OWNS the number.
+        self.tier_up = g("bench_compactor_tier_up",
+                         "Tier service /health reachable and UP", ["tier"])
+        self.tier_uptime = g("bench_compactor_tier_uptime_seconds",
+                             "Tier service uptime", ["tier"])
+        self.tier_cycles = g("bench_compaction_tier_cycles_total",
+                             "Compaction cycles run, from the service that owns the tier",
+                             ["database", "tier"])
+        self.tier_failed = g("bench_compaction_tier_failed_cycles_total",
+                             "Failed cycles reported by the tier service — health stays UP "
+                             "through these, so this is the real success signal",
+                             ["database", "tier"])
+        self.tier_files_compacted = g("bench_compaction_tier_files_compacted_total",
+                                      "Files merged by the tier service", ["database", "tier"])
+        self.tier_band_files = g("bench_compactor_tier_band_files",
+                                 "Live files currently inside the tier's size band, as seen "
+                                 "by the owning service", ["database", "tier"])
+        self.tier_last_success_age = g("bench_compaction_tier_last_success_age_seconds",
+                                       "Seconds since the tier's last successful cycle",
+                                       ["database", "tier"])
+
+        # Catalog truth for the same bands, incl. the one no tier compacts.
+        self.files_by_band = g("bench_catalog_files_by_band",
+                               "Live catalog files by size band (small/medium/large; large "
+                               "is above every compaction band and only ever grows)", ["band"])
+        self.bytes_by_band = g("bench_catalog_bytes_by_band",
+                               "Live catalog bytes by size band", ["band"])
 
         # B2 — the backlog compaction drains.
         self.backlog_files = g("bench_backlog_files", "Live data files in the catalog")
@@ -201,6 +242,48 @@ def parse_iso_duration(text: str) -> float:
     return total
 
 
+def parse_iso_instant(text: str) -> float:
+    """2026-09-17T06:28:17.907Z -> epoch seconds; 0.0 if absent or unparseable."""
+    if not text:
+        return 0.0
+    try:
+        base, _, frac = text.rstrip("Z").partition(".")
+        secs = calendar.timegm(time.strptime(base, "%Y-%m-%dT%H:%M:%S"))
+        return secs + (float("0." + frac) if frac else 0.0)
+    except (ValueError, OverflowError):
+        return 0.0
+
+
+def compactor_db_stats(s: dict) -> dict:
+    """Normalize one database's stats from the compactor /health body.
+
+    Builds ≤ 0.2.18 report a flat dict (totalMinorCompactions, currentSmallFiles,
+    ...). The build deployed 2026-09-17 nests per-tier counters under "tiers":
+    {"minor": {"totalCompactions", "currentFiles"}, "major": {...}}. Small files
+    are the minor tier's inventory, medium the major tier's.
+    """
+    tiers = s.get("tiers")
+    if not isinstance(tiers, dict):
+        return {
+            "minor": s.get("totalMinorCompactions", 0),
+            "major": s.get("totalMajorCompactions", 0),
+            "files_compacted": s.get("totalFilesCompacted", 0),
+            "small": s.get("currentSmallFiles", 0),
+            "medium": s.get("currentMediumFiles", 0),
+            "total": s.get("currentTotalFiles", 0),
+        }
+    minor = tiers.get("minor") or {}
+    major = tiers.get("major") or {}
+    return {
+        "minor": minor.get("totalCompactions", 0),
+        "major": major.get("totalCompactions", 0),
+        "files_compacted": s.get("totalFilesCompacted", 0),
+        "small": minor.get("currentFiles", 0),
+        "medium": major.get("currentFiles", 0),
+        "total": s.get("currentTotalFiles", 0),
+    }
+
+
 class PipelineExporter:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
@@ -234,6 +317,12 @@ class PipelineExporter:
         a channel open on an existing TCP session, not a fresh SSH handshake
         every 10 seconds.
         """
+        text = self._ssh_run(ssh_host, f"cat {self.args.agent_state_path}")
+        if not text:
+            raise RuntimeError(f"{self.args.agent_state_path} is empty — is bench-agent running?")
+        return json.loads(text)
+
+    def _ssh_run(self, ssh_host: str, remote_cmd: str) -> str:
         ctl = f"/tmp/bench-ssh-{ssh_host}.sock"
         cmd = ["ssh", "-n", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
                "-o", "StrictHostKeyChecking=accept-new",
@@ -241,15 +330,31 @@ class PipelineExporter:
                "-o", "ControlPersist=300"]
         if self.args.ssh_key:
             cmd += ["-i", os.path.expanduser(self.args.ssh_key)]
-        cmd += [f"{self.args.ssh_user}@{ssh_host}", f"cat {self.args.agent_state_path}"]
+        cmd += [f"{self.args.ssh_user}@{ssh_host}", remote_cmd]
         out = subprocess.run(cmd, capture_output=True, timeout=self.args.http_timeout + 5)
         if out.returncode != 0:
             raise RuntimeError(
                 (out.stderr.decode(errors="replace").strip() or "ssh failed")[:160])
-        text = out.stdout.decode(errors="replace").strip()
-        if not text:
-            raise RuntimeError(f"{self.args.agent_state_path} is empty — is bench-agent running?")
-        return json.loads(text)
+        return out.stdout.decode(errors="replace").strip()
+
+    def _set_tier_metrics(self, tier: str, data: dict) -> None:
+        """Publish per-tier gauges from one tier service's /health body (new format)."""
+        self.prom.tier_up.labels(tier=tier).set(1 if data.get("status") == "UP" else 0)
+        self.prom.tier_uptime.labels(tier=tier).set(parse_iso_duration(data.get("uptime", "")))
+        for db, s in (data.get("databases") or {}).items():
+            own = (s.get("tiers") or {}).get(tier) or {}
+            self.prom.tier_cycles.labels(database=db, tier=tier).set(
+                own.get("totalCompactions", 0))
+            self.prom.tier_band_files.labels(database=db, tier=tier).set(
+                own.get("currentFiles", 0))
+            self.prom.tier_failed.labels(database=db, tier=tier).set(
+                s.get("totalFailedCycles", 0))
+            self.prom.tier_files_compacted.labels(database=db, tier=tier).set(
+                s.get("totalFilesCompacted", 0))
+            last = parse_iso_instant(s.get("lastSuccessTime", ""))
+            if last > 0:
+                self.prom.tier_last_success_age.labels(database=db, tier=tier).set(
+                    max(0.0, time.time() - last))
 
     def scrape_collector(self) -> dict:
         if self.args.health_mode == "ssh":
@@ -301,13 +406,23 @@ class PipelineExporter:
             self.prom.collector_queues.set(float(body.get("knownQueues") or 0))
         else:
             uptime_gauge.set(parse_iso_duration(body.get("uptime", "")))
+            split = self.args.compactor_major_health_port > 0
             for db, s in (body.get("databases") or {}).items():
-                self.prom.minor.labels(database=db).set(s.get("totalMinorCompactions", 0))
-                self.prom.major.labels(database=db).set(s.get("totalMajorCompactions", 0))
-                self.prom.files_compacted.labels(database=db).set(s.get("totalFilesCompacted", 0))
-                self.prom.files_small.labels(database=db).set(s.get("currentSmallFiles", 0))
-                self.prom.files_medium.labels(database=db).set(s.get("currentMediumFiles", 0))
-                self.prom.files_total.labels(database=db).set(s.get("currentTotalFiles", 0))
+                st = compactor_db_stats(s)
+                self.prom.minor.labels(database=db).set(st["minor"])
+                self.prom.files_compacted.labels(database=db).set(st["files_compacted"])
+                self.prom.files_small.labels(database=db).set(st["small"])
+                self.prom.files_total.labels(database=db).set(st["total"])
+                # Under the two-service split this body is the MINOR service's
+                # view: its major counters are always 0. The major service owns
+                # those gauges (scrape_compactor_major); writing 0 here would
+                # make them flap once per poll.
+                if not (split and isinstance(s.get("tiers"), dict)):
+                    self.prom.major.labels(database=db).set(st["major"])
+                    self.prom.files_medium.labels(database=db).set(st["medium"])
+            if any(isinstance(s.get("tiers"), dict)
+                   for s in (body.get("databases") or {}).values()):
+                self._set_tier_metrics("minor", body)
 
         self.prom.health_latency.labels(role=role).set(float(health.get("latency_ms") or 0))
         self.prom.unit_restarts.labels(role=role).set(float(unit.get("restarts") or 0))
@@ -345,19 +460,60 @@ class PipelineExporter:
 
     def scrape_compactor(self) -> dict:
         if self.args.health_mode == "ssh":
-            return self._scrape_agent("compactor", self.args.compactor_ssh_host,
-                                      self.prom.compactor_up, self.prom.compactor_uptime)
+            try:
+                return self._scrape_agent("compactor", self.args.compactor_ssh_host,
+                                          self.prom.compactor_up, self.prom.compactor_uptime)
+            except Exception:
+                # A failed scrape must read as DOWN, not as the last good value.
+                self.prom.tier_up.labels(tier="minor").set(0)
+                raise
         url = f"http://{self.args.compactor_host}:{self.args.compactor_health_port}/health"
         data = http_json(url, self.args.http_timeout)
         self.prom.compactor_up.set(1 if data.get("status") == "UP" else 0)
         self.prom.compactor_uptime.set(parse_iso_duration(data.get("uptime", "")))
+        split = self.args.compactor_major_health_port > 0
         for db, s in (data.get("databases") or {}).items():
-            self.prom.minor.labels(database=db).set(s.get("totalMinorCompactions", 0))
-            self.prom.major.labels(database=db).set(s.get("totalMajorCompactions", 0))
-            self.prom.files_compacted.labels(database=db).set(s.get("totalFilesCompacted", 0))
-            self.prom.files_small.labels(database=db).set(s.get("currentSmallFiles", 0))
-            self.prom.files_medium.labels(database=db).set(s.get("currentMediumFiles", 0))
-            self.prom.files_total.labels(database=db).set(s.get("currentTotalFiles", 0))
+            st = compactor_db_stats(s)
+            self.prom.minor.labels(database=db).set(st["minor"])
+            self.prom.files_compacted.labels(database=db).set(st["files_compacted"])
+            self.prom.files_small.labels(database=db).set(st["small"])
+            self.prom.files_total.labels(database=db).set(st["total"])
+            if not (split and isinstance(s.get("tiers"), dict)):
+                self.prom.major.labels(database=db).set(st["major"])
+                self.prom.files_medium.labels(database=db).set(st["medium"])
+        if any(isinstance(s.get("tiers"), dict)
+               for s in (data.get("databases") or {}).values()):
+            self._set_tier_metrics("minor", data)
+        return data
+
+    def scrape_compactor_major(self) -> dict:
+        """The major tier runs as its own JVM with its own /health (:8090).
+
+        Same reachability rules as the minor tier: the port is closed in the
+        security group, so in ssh mode the check rides the multiplexed SSH
+        connection and curls loopback on the far side.
+        """
+        port = self.args.compactor_major_health_port
+        try:
+            if self.args.health_mode == "ssh":
+                text = self._ssh_run(self.args.compactor_ssh_host,
+                                     f"curl -sf -m {int(self.args.http_timeout)} "
+                                     f"http://127.0.0.1:{port}/health")
+                if not text:
+                    raise RuntimeError(
+                        f"empty /health from :{port} — is bench-compactor-major up?")
+                data = json.loads(text)
+            else:
+                data = http_json(f"http://{self.args.compactor_host}:{port}/health",
+                                 self.args.http_timeout)
+        except Exception:
+            self.prom.tier_up.labels(tier="major").set(0)
+            raise
+        self._set_tier_metrics("major", data)
+        for db, s in (data.get("databases") or {}).items():
+            st = compactor_db_stats(s)
+            self.prom.major.labels(database=db).set(st["major"])
+            self.prom.files_medium.labels(database=db).set(st["medium"])
         return data
 
     def scrape_catalog(self) -> dict:
@@ -378,6 +534,18 @@ class PipelineExporter:
             self.prom.small_files.set(sf)
             self.prom.small_bytes.set(int(sb))
             self.prom.small_rows.set(int(sr))
+
+            # The same live files split into the tiers' bands, plus 'large' —
+            # everything ABOVE the top band, which nothing compacts. Zero-fill
+            # so the large series doesn't vanish while the trap is empty.
+            cur.execute(SQL_FILES_BY_BAND, {"minor_max": self.args.band_minor_max,
+                                            "major_max": self.args.band_major_max})
+            bands = {band: {"files": n, "bytes": int(b)} for band, n, b in cur.fetchall()}
+            for band in ("small", "medium", "large"):
+                v = bands.get(band) or {"files": 0, "bytes": 0}
+                self.prom.files_by_band.labels(band=band).set(v["files"])
+                self.prom.bytes_by_band.labels(band=band).set(v["bytes"])
+            out.update(files_by_band=bands)
 
             cur.execute(SQL_SNAPSHOTS)
             snaps, max_snap = cur.fetchone()
@@ -424,7 +592,8 @@ class PipelineExporter:
     def scrape_watermark(self) -> dict:
         con = self._duck_conn()
         row = con.execute(
-            "SELECT COALESCE(EXTRACT(EPOCH FROM (now()::TIMESTAMP - max(max_timestamp))), -1), "
+            "SELECT COALESCE(EXTRACT(EPOCH FROM (now()::TIMESTAMPTZ - "
+            f"                max({self.args.watermark_ts_column})::TIMESTAMPTZ)), -1), "
             "       COALESCE(sum(row_count), 0) "
             f"FROM {self.args.catalog}.{self.args.schema}.{self.args.watermark_table}").fetchone()
         lag = float(row[0])
@@ -483,6 +652,8 @@ class PipelineExporter:
         }
         self._run_source("collector", self.scrape_collector, sample)
         self._run_source("compactor", self.scrape_compactor, sample)
+        if self.args.compactor_major_health_port > 0:
+            self._run_source("compactor_major", self.scrape_compactor_major, sample)
         self._run_source("catalog", self.scrape_catalog, sample)
 
         # Expensive sources on their own, slower cadence. A full ListObjectsV2
@@ -563,6 +734,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     ap.add_argument("--collector-health-port", type=int, default=int(e("COLLECTOR_HEALTH_PORT", 8081)))
     ap.add_argument("--compactor-host", default=e("COMPACTOR_HOST", "127.0.0.1"))
     ap.add_argument("--compactor-health-port", type=int, default=int(e("COMPACTOR_HEALTH_PORT", 8080)))
+    # 0 disables the major-tier scrape (pre-split deployments).
+    ap.add_argument("--compactor-major-health-port", type=int,
+                    default=int(e("COMPACTOR_MAJOR_HEALTH_PORT", 8090)))
 
     ap.add_argument("--pg-host", default=e("PG_HOST", ""))
     ap.add_argument("--pg-port", type=int, default=int(e("PG_PORT", 5432)))
@@ -576,9 +750,15 @@ def parse_args(argv=None) -> argparse.Namespace:
 
     ap.add_argument("--catalog", default=e("DUCKLAKE_CATALOG", "bench"))
     ap.add_argument("--schema", default=e("DUCKLAKE_SCHEMA", "main"))
-    ap.add_argument("--watermark-table", default=e("DUCKLAKE_WATERMARK_TABLE", "ingest_watermark"))
+    ap.add_argument("--watermark-table", default=e("DUCKLAKE_WATERMARK_TABLE", "ai_txn_watermark"))
+    ap.add_argument("--watermark-ts-column", default=e("DUCKLAKE_WATERMARK_TS_COLUMN", "max_time"))
     # Default 8 MiB = the compactor's minor_compaction_max_size.
     ap.add_argument("--small-file-threshold", type=int, default=8 * 1024 * 1024)
+    # Tier band edges after the 2026-09-17 split: minor [0,12M), major [12M,64M).
+    ap.add_argument("--band-minor-max", type=int,
+                    default=int(e("BAND_MINOR_MAX_BYTES", 12 * 1024 * 1024)))
+    ap.add_argument("--band-major-max", type=int,
+                    default=int(e("BAND_MAJOR_MAX_BYTES", 64 * 1024 * 1024)))
     ap.add_argument("--log-level", default="INFO")
     return ap.parse_args(argv)
 
