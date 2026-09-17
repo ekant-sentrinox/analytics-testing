@@ -21,7 +21,7 @@ generator:
     secret_b64: ${OTEL_JWT_SECRET_B64}
     # Routed by the x-dd-ingestion-queue claim. Must match an ingestion_queue
     # in the collector's ingestion_queue_table_mapping.
-    ingestion_queue: ${OTEL_INGESTION_QUEUE}
+    ingestion_queue: ai_txn
     subject: bench-generator
     token_ttl_seconds: 3600
 
@@ -73,6 +73,15 @@ generator:
     abort_on_consecutive_failures: 0    # 0 disables
 
   data:
+    # Selects payload_ai_txn over the generic logs payload. The generic
+    # payload emits gen_ai.*/http.* keys, which v_ai_txn_transform reads
+    # none of -- every ai_txn column would land NULL.
+    schema: ai_txn
+    # customer_id is a RESOURCE attribute and the OTLP Resource is per
+    # export-request, so one template carries one customer. Requires
+    # workload.workers * 4 >= customers or only that many partitions
+    # ever receive traffic; the generator exits 5 rather than under-report.
+    customers: 100
     tenant_id: testing-tenant
     workspace_id: testing-workspace
     service_names: [checkout, payments, search, inventory, recommendations]
@@ -156,15 +165,16 @@ profiles:
       step_duration must contain several compaction cycles or the backlog slope
       is noise — see TEST_PLAN.md.
     steps:
-      - { rps: 1000,  duration_seconds: 600 }
-      - { rps: 2000,  duration_seconds: 600 }
-      - { rps: 5000,  duration_seconds: 600 }
-      - { rps: 10000, duration_seconds: 600 }
-      - { rps: 15000, duration_seconds: 600 }
-      - { rps: 20000, duration_seconds: 600 }
-      - { rps: 25000, duration_seconds: 600 }
+      - { rps: 5000,  duration_seconds: 300 }
+      - { rps: 10000, duration_seconds: 300 }
+      - { rps: 15000, duration_seconds: 300 }
+      - { rps: 20000, duration_seconds: 300 }
+      - { rps: 25000, duration_seconds: 300 }
+      - { rps: 30000, duration_seconds: 300 }
+      - { rps: 35000, duration_seconds: 300 }
+      - { rps: 40000, duration_seconds: 300 }
     # Sized for the top rung: 25,000 x 5 s = 125,000 in flight -> 50 x 2500.
-    workload: { workers: 80, channels: 8, batch_size: 4000, max_inflight: 320 }
+    workload: { workers: 80, channels: 8, batch_size: 2500, max_inflight: 320 }
 
   stress:
     description: Push past the knee until throughput plateaus or errors climb, then stop.
@@ -184,8 +194,8 @@ profiles:
   soak:
     description: Long run at a fraction of the measured sustainable rate. Watch for drift.
     # 3,000 x 5 s = 15,000 in flight. 20 x 750 = 15,000.
-    workload: { target_rps: 3000, duration_seconds: 21600, workers: 20, channels: 4,
-                batch_size: 750, max_inflight: 48 }
+    workload: { target_rps: 5000, duration_seconds: 86400, workers: 80,
+                channels: 8, batch_size: 2500, max_inflight: 160 }
     checkpoint_interval_seconds: 3600
 
   recovery:

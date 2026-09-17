@@ -66,7 +66,7 @@ Already true on these hosts; listed so a rebuild is reproducible.
 
 | | |
 |---|---|
-| All three | Amazon Linux 2023, t3.large (2 vCPU / 7.6 GiB / 8 GiB root), chrony synced |
+| All three | Amazon Linux 2023, 8 GiB root, chrony synced. Resized 2026-09-15 (all were t3.large before that — pre-09-15 results were measured on the smaller hardware): SERVER 1 t3.xlarge (4 vCPU / 15.4 GiB), SERVER 2 t3.2xlarge (8 vCPU / 31 GiB), SERVER 3 t3.xlarge (4 vCPU / 15.4 GiB) |
 | SERVER 1 | Python 3.11, Docker + compose (monitoring only), AWS CLI, `duckdb` CLI, SSH access to 2 and 3 |
 | SERVER 2 | Java 21 (Corretto), Maven, the `dazzleduck-sql-server` checkout |
 | SERVER 3 | Java 21, Maven, Git, the checkout |
@@ -196,28 +196,31 @@ omitted. Reading one: **[RESULTS.md](RESULTS.md)**.
 
 Honest list. Nothing here is worked around silently.
 
-1. **Security group.** All three hosts share `sg-0ea9dd40012388877`, which
-   allows port 22 only. Ports 4317, 8080, 8081 (and 9100 for node_exporter) are
-   *dropped*, so the generator cannot reach the collector and Prometheus cannot
-   reach the health endpoints. The services are healthy on their own loopbacks.
-   The exact rules to add are in **[NETWORK.md](NETWORK.md)**. Until they are
-   added, no Track B number can be produced.
+1. **Security group.** ~~All three hosts share `sg-0ea9dd40012388877`, which
+   allows port 22 only.~~ **Resolved for the data path 2026-09-11:** inbound TCP
+   4317 was opened (rule `sgr-0ef64d09c99bd4b5a`) and all runs since use
+   `transport=direct` — tunnel-era numbers are floors, direct-era numbers are
+   real. Health/metrics ports (8080, 8081, 9100) status is tracked in
+   **[NETWORK.md](NETWORK.md)**.
 2. **Collector queue depth (B1) is unmeasurable.** `writer.pending_batches` and
    `writer.pending_buckets` live in an unexported registry. The first visible
    sign of queue saturation is `RESOURCE_EXHAUSTED`, by which point it is full.
 3. **`data_phase_ms` vs `post_ingest_phase_ms` is unmeasurable.** The single
    most useful diagnostic in the pipeline — *is the bottleneck DuckDB or the
    catalog?* — is registered and never exported.
-4. **Hardware bounds the plan.** 2 vCPU and ~5 GiB free disk per host. The
-   source spec's 100M/500M-row datasets and 100 GB–1 TB compaction tiers do not
-   fit and are reported `NOT TESTED`, not estimated.
+4. **Hardware bounds the plan.** ~5 GiB free root disk per host (instances were
+   upsized 2026-09-15, root volumes were not). The source spec's 100M/500M-row
+   datasets and 100 GB–1 TB compaction tiers do not fit locally and are reported
+   `NOT TESTED`, not estimated.
 5. **t3 is burstable.** CPU credit exhaustion during a long soak throttles the
    vCPU and is indistinguishable from a software regression on a graph. Check
    credits before blaming code.
-6. **The generator may bind first.** A Python generator on 2 vCPU is plausibly
-   the limit somewhere in the tens of thousands of records/s. The stress test
-   watches generator CPU and pacer stall and says so explicitly rather than
-   reporting it as a pipeline ceiling.
+6. **The generator binds first above ~25k rec/s.** Confirmed 2026-09-15: the
+   staircase to 25,000 rec/s passed cleanly with collector and compactor showing
+   large headroom, and every attempt above that hit generator-side resource
+   limits (Python `threading` is GIL-bound to ~1 core). Higher aggregate rates
+   need multiple generator hosts, not a bigger one — sizing table in
+   `report/20260915-124858-throughput/SUMMARY.md`.
 7. **Three faults are not implemented here** — catalog-unavailable,
    storage-latency, network-partition — because the catalog is a shared RDS
    instance and the route table is not writable from the instance role.
@@ -243,6 +246,7 @@ Suggested fixes to the upstream project, gathered while building this:
 | [RESULTS.md](RESULTS.md) | how to read a report without over-claiming |
 | [IMPROVEMENTS.md](IMPROVEMENTS.md) | findings for dazzleduck-sql-server |
 | [CHANGELOG.md](CHANGELOG.md) | |
+| [report/](report/) | published per-campaign reports: 2026-09-15 peak test, 2026-09-16 ai_txn soak |
 
 ---
 
@@ -261,7 +265,7 @@ The bucket and the RDS instance are **shared**. This project:
   auth is the instance role, and the catalog password is read from a file at
   process start and never copied.
 
-## Tuning log & requirements (updated 2026-09-11)
+## Tuning log & requirements (updated 2026-09-17)
 
 Everything in this section was changed or discovered on 2026-09-11 during the
 post-campaign tuning session. Original config files are preserved next to the
@@ -314,9 +318,12 @@ Tuned runs after this point are directly comparable to these two.
 - **S3 credentials expire ~6 h after each service start** (DuckDB
   credential_chain fetches the EC2 instance-profile STS token once and never
   refreshes — IMPROVEMENTS.md finding 16). Symptom: every compaction/write
-  fails with ExpiredToken while `/health` still says UP. Fix until the product
-  handles it: restart `bench-collector` / `bench-compactor` before any run if
-  they have been up longer than ~5 h.
+  fails with ExpiredToken while `/health` still says UP. Stopgap now automated
+  on SERVER 3 (2026-09-17): drop-in
+  `/etc/systemd/system/bench-compactor.service.d/10-credential-refresh.conf`
+  caps each compactor run at 4 h (`RuntimeMaxSec`) with auto-restart — observed
+  cycling cleanly. The collector has no such drop-in yet: restart
+  `bench-collector` before any run if it has been up longer than ~5 h.
 - The compactor `/health` field `totalFilesCompacted` staying at 0 while
   cycles "complete" usually means the minor threshold is below the bucket file
   size (that is what the 48 MB change fixes), not that the compactor is broken.
@@ -447,3 +454,57 @@ Verified today: 22 correctness-PASS runs, 144,815,300 accepted records, 0 loss /
 0 duplicates across every run. Peak validated rate 15,036 rec/s (max-stress, run
 20260911-150804). Writer-parallelism (code change, branch performance-benchmark-spec)
 crash-safe under SIGKILL. Trickle left running; soak script self-terminates 05:00Z.
+
+### HARDWARE UPGRADE + 25k STAIRCASE (2026-09-15) — every ~13k number above is superseded
+
+Instances resized: SERVER 2 → t3.2xlarge (8 vCPU / 31 GiB), SERVER 3 →
+t3.xlarge (4 vCPU / 15.4 GiB), SERVER 1 → t3.xlarge later the same day. All
+2026-09-11 ceilings (~12.5–15k rec/s) were measured on the old 2-vCPU hosts and
+no longer describe this environment.
+
+Run `20260915-124858-throughput`: staircase 1,000 → **25,000 rec/s, every step
+ratio 1.0000** — 46,800,000 offered, 46,800,000 accepted, zero rejected, zero
+lost. Collector averaged 14.5% CPU, compactor 20% — both far from saturation.
+**Above 25k the generator itself is the limit** (Python GIL, ~1 core); attempts
+to jump straight to higher rates exhausted the test tool, not the pipeline.
+Scaling past 25k needs multiple generator hosts (sizing table in the report).
+Published reports: `report/PEAK_PERFORMANCE_TEST_2026-09-15.md` (summary),
+`_DETAILED.md`, and per-run `report/20260915-*/{SUMMARY,DETAILED}.md`. The
+py-spy profiling run `20260915-160407-throughput` pinned the generator-side
+root cause (commit a167617).
+
+### AI-TRANSACTION WORKLOAD + SOAK CAMPAIGN (2026-09-16 → 17)
+
+New config-driven payload schema **`ai_txn`** (`generator/src/payload_ai_txn.py`,
+`config/generator-ai-txn.yaml`, dispatch in `generator/src/main.py` on
+`data.schema`): emits the `snx./req./res./llm.` attribute set that
+`v_ai_txn_transform` reads — per-customer resources (100 customers), model
+traffic with token counts and pricing, HTTP status and latency mixes, queue
+`ai_txn`. The generator refuses to start (exit 5/6) if the template pool cannot
+cover every configured customer or a batch would exceed gRPC's 4 MiB cap,
+rather than silently under-reporting.
+
+- **Soak #1 `20260916-134306-soak`** (5,000 rec/s target, 24 h intent):
+  interrupted after 5.4 h. 96,640,000 offered / 70,472,500 accepted — the gap is
+  **10,467 requests failed `UNAVAILABLE`** (collector unreachable/restarting
+  mid-run; `bench-collector` was restarted at 19:03Z), not backpressure
+  (0 rejected). p50 6.7 s. Kept as a failure record per protocol.
+- **Soak #2 `20260916-190938-soak`** (relaunch, 5,000 rec/s × 24 h, direct,
+  64 MiB buckets): running since 19:10Z, due ~19:10Z 2026-09-17. As of 03:47Z:
+  ~154 M offered, ~153.98 M accepted, **0 failed / 0 rejected**, stall 0.
+  Status and verdict: `report/SOAK_AI_TXN_2026-09-16.md`.
+
+### OPERATIONAL STATUS (2026-09-17 03:45Z)
+
+- Compactor credential stopgap **in place and working**: systemd drop-in
+  `10-credential-refresh.conf` (RuntimeMaxSec=4 h + auto-restart) on
+  `bench-compactor`; observed cycling at 02:52Z, no ExpiredToken since. The
+  code-level fix (IMPROVEMENTS #16) is still the real requirement.
+- Compactor keeping up under the live soak: 46 minor compactions / 253 files in
+  the first 48 min after its 02:52Z restart, `currentSmallFiles` stable.
+- An experimental **major-only compactor** (`bench-compactor-major`, health
+  :8090, `/opt/analytics-bench/compactor-major/`) was run manually on 09-16 and
+  is now stopped/disabled. Its shutdown produced a **JVM SIGSEGV in native code**
+  (`hs_err_pid502076.log` in its directory) — a real finding to file upstream.
+  `totalMajorCompactions` on the main compactor is 0 and medium-file count grows
+  until a major tier runs.

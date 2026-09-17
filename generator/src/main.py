@@ -34,12 +34,14 @@ if __package__ in (None, ""):
     from generator.src.metrics import Metrics                             # noqa: E402
     from generator.src.otlp_client import LogsExporter, TokenSource       # noqa: E402
     from generator.src.payload import build_factory                       # noqa: E402
+    from generator.src.payload_ai_txn import build_factory as build_ai_txn_factory  # noqa: E402
 else:
     from . import config as config_mod
     from .loadgen import LoadGenerator, StepResult
     from .metrics import Metrics
     from .otlp_client import LogsExporter, TokenSource
     from .payload import build_factory
+    from .payload_ai_txn import build_factory as build_ai_txn_factory
 
 log = logging.getLogger("generator")
 
@@ -178,7 +180,35 @@ def main(argv: list[str] | None = None) -> int:
         exporter.close()
         return 4
 
-    factory = build_factory(cfg.data, cfg.workload.batch_size, cfg.workload.workers)
+    # Payload schema is config-driven so the generic `logs` path stays the
+    # default and the rollback is "delete the key". ai_txn emits the
+    # snx./req./res./llm. attribute set that v_ai_txn_transform reads; the
+    # generic payload's gen_ai.* keys are read by nothing in that transform and
+    # would land every column NULL.
+    _schema = str((cfg.data or {}).get("schema", "logs")).lower()
+    if _schema == "ai_txn":
+        _customers = int((cfg.data or {}).get("customers", 100))
+        factory = build_ai_txn_factory(cfg.data, cfg.workload.batch_size,
+                                       cfg.workload.workers, customers=_customers)
+        # The OTLP Resource is per export-request, so one template carries one
+        # customer and the pool size caps how many customer partitions can ever
+        # be written. Silently covering 32 of 100 would look like a successful
+        # 100-customer run, so refuse rather than under-report.
+        _warn = factory.coverage_warning()
+        if _warn:
+            log.error("ai_txn customer coverage: %s", _warn)
+            exporter.close()
+            return 5
+        # Refuse to start rather than reject every batch at the wire for the
+        # whole run. gRPC's 4 MiB cap is not negotiable and dazzleduck exposes
+        # no setting for it, so batch_size * bytes-per-record is a hard bound.
+        _over = factory.oversize_error()
+        if _over:
+            log.error("ai_txn batch too large for gRPC: %s", _over)
+            exporter.close()
+            return 6
+    else:
+        factory = build_factory(cfg.data, cfg.workload.batch_size, cfg.workload.workers)
     log.info("payload: %s", json.dumps(factory.describe()))
 
     if args.dry_run:

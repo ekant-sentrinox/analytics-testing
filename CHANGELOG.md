@@ -1,5 +1,58 @@
 # Changelog
 
+## 0.2.0 — 2026-09-15 … 2026-09-17
+
+### Environment
+
+- Instances resized (2026-09-15): SERVER 1 → t3.xlarge, SERVER 2 → t3.2xlarge,
+  SERVER 3 → t3.xlarge. Results before/after this date are not comparable
+  (different `env_hash`).
+- Inbound TCP 4317 open since 2026-09-11 (`sgr-0ef64d09c99bd4b5a`); all runs now
+  `transport=direct`.
+- Compactor credential stopgap automated (SERVER 3): systemd drop-in
+  `10-credential-refresh.conf` restarts `bench-compactor` every 4 h
+  (`RuntimeMaxSec`), working around the 6-h STS expiry (IMPROVEMENTS #16) until
+  the code-level fix ships.
+
+### Added
+
+- **`ai_txn` payload schema** — `generator/src/payload_ai_txn.py` plus
+  `config/generator-ai-txn.yaml`; selected via `data.schema: ai_txn`. Emits the
+  `snx./req./res./llm.` attribute set consumed by `v_ai_txn_transform`:
+  100 per-customer OTLP resources, LLM model traffic with token counts and
+  pricing, HTTP status and latency mixes. Startup guards: refuses to run if the
+  template pool cannot cover all configured customers (exit 5) or a batch would
+  exceed gRPC's 4 MiB message cap (exit 6).
+- `run -> report -> publish` automation (`bench/publish_report.py`,
+  `scripts/run-and-publish.sh`), published reports under `report/`.
+- Throughput profile headroom raised (workers 80, batch 4000, inflight 320) for
+  the 25k staircase.
+
+### Results
+
+- **25,000 rec/s staircase PASS** (`20260915-124858-throughput`): 46.8 M
+  offered = accepted, 0 rejected/lost at every step; collector avg 14.5% CPU,
+  compactor 20%. Above 25k the Python generator is the binding constraint
+  (GIL); horizontal generator scaling table in the report.
+- **ai_txn soak #1** (`20260916-134306-soak`) interrupted: 96.64 M offered /
+  70.47 M accepted, 10,467 requests `UNAVAILABLE` (collector
+  unreachable/restarted mid-run), 0 rejected. Kept as a failure record.
+- **ai_txn soak #2** (`20260916-190938-soak`): 24 h at 5,000 rec/s, in progress
+  (due ~19:10Z 2026-09-17), clean so far — `report/SOAK_AI_TXN_2026-09-16.md`.
+
+### Findings
+
+- `bench-compactor-major` (experimental major-only compactor) crashed with a
+  JVM SIGSEGV in native code during shutdown —
+  `/opt/analytics-bench/compactor-major/hs_err_pid502076.log`; to be filed
+  against dazzleduck-sql-ducklake-compactor.
+
+### Housekeeping (2026-09-17)
+
+- Removed timestamped `*.bak.20260916-*` editor backups (git and the live files
+  are the source of truth), 2026-09-10/15 `run/bench-job-*.done` markers, and
+  rotated `logs/archive/*.gz` from 09-15 (their runs' data live in `results/`).
+
 ## 0.1.0 — 2026-09-10
 
 First working version. Built and verified against the live three-server
